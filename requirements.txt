@@ -1,0 +1,12 @@
+streamlit
+requests
+pandas
+python-docx
+beautifulsoup4
+python-dateutil
+tabulate
+html5lib
+lxml
+python-dateutil
+selenium
+webdriver-manager
