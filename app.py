@@ -1912,32 +1912,34 @@ if modo_app == "Boletín":
             if all_dfs:
                 f_df = pd.concat(all_dfs, ignore_index=True)
                 
-                # 1. SEPARAR Y ORDENAR CON REGLAS Y JERARQUÍA ESTRICTA
+                # --- PREPARACIÓN PARA EL WORD (Orden Institucional) ---
                 df_rep = f_df[f_df['Categoría'] == "Reportes"].copy()
                 df_pub = f_df[f_df['Categoría'] == "Publicaciones Institucionales"].copy()
                 df_inv = f_df[f_df['Categoría'] == "Investigación"].copy()
                 df_disc = f_df[f_df['Categoría'] == "Discursos"].copy()
                 
-                # Ordenamiento específico
                 if not df_rep.empty: df_rep = df_rep.sort_values(by=["Organismo", "Title"], ascending=[True, True])
                 if not df_pub.empty: df_pub = df_pub.sort_values(by=["Organismo", "Title"], ascending=[True, True])
                 if not df_inv.empty: df_inv = df_inv.sort_values(by=["Organismo", "Title"], ascending=[True, True])
-                if not df_disc.empty: df_disc = df_disc.sort_values(by=["Title"], ascending=[True]) # Sin agrupar por organismo
+                if not df_disc.empty: df_disc = df_disc.sort_values(by=["Title"], ascending=[True])
                 
-                # Unimos respetando tu jerarquía exacta
-                f_df = pd.concat([df_rep, df_pub, df_inv, df_disc], ignore_index=True)
-                
-                # 2. COLUMNAS: Dejamos las 3 solicitadas + Link
-                f_df = f_df[['Categoría', 'Organismo', 'Title', 'Link']]
-                f_df = f_df.rename(columns={"Categoría": "Tipo de Documento", "Title": "Nombre de Documento"})
+                f_df_word = pd.concat([df_rep, df_pub, df_inv, df_disc], ignore_index=True)
+                f_df_word = f_df_word[['Categoría', 'Organismo', 'Title', 'Link']]
+                f_df_word = f_df_word.rename(columns={"Categoría": "Tipo de Documento", "Title": "Nombre de Documento"})
                 
                 st.success(f"Se consolidaron **{len(f_df)}** documentos en total.")
-                word = generate_word(f_df, subtitle=", ".join(m_sel) + " " + ", ".join(a_sel))
+                word = generate_word(f_df_word, subtitle=", ".join(m_sel) + " " + ", ".join(a_sel))
                 st.download_button("📄 Descargar Boletín", word, f"Boletin_{'_'.join(m_sel)}.docx")
                 
+                # --- PREPARACIÓN PARA LA VISTA PREVIA (Orden Cronológico + Columna Fecha) ---
                 disp = f_df.copy()
-                disp["Nombre de Documento"] = disp.apply(lambda x: f"[{x['Nombre de Documento']}]({x['Link']})", axis=1)
-                st.markdown(disp[["Tipo de Documento", "Organismo", "Nombre de Documento"]].to_markdown(index=False), unsafe_allow_html=True)
+                disp = disp.sort_values(by="Date", ascending=False) # Orden cronológico
+                disp["Fecha"] = disp["Date"].dt.strftime('%d/%m/%Y') # Formatear fecha para que se vea bonita
+                disp["Nombre de Documento"] = disp.apply(lambda x: f"[{x['Title']}]({x['Link']})", axis=1)
+                disp = disp.rename(columns={"Categoría": "Tipo de Documento"})
+                
+                # Mostrar en pantalla incluyendo la columna 'Fecha'
+                st.markdown(disp[["Fecha", "Tipo de Documento", "Organismo", "Nombre de Documento"]].to_markdown(index=False), unsafe_allow_html=True)
             else: 
                 st.warning("No se encontraron documentos para los criterios seleccionados.")
 
@@ -2042,25 +2044,34 @@ elif modo_app == "Categorías":
             
             if dfs_comb:
                 f_df = pd.concat(dfs_comb, ignore_index=True)              
-                # --- FORMATO HOMOGÉNEO (IGUAL AL BOLETÍN) ---
                 f_df['Categoría'] = tipo_doc
+                
+                # --- PREPARACIÓN PARA EL WORD (Orden Institucional) ---
                 if tipo_doc == "Discursos":
-                    f_df = f_df.sort_values(by=["Title"], ascending=[True])
+                    f_df_word = f_df.sort_values(by=["Title"], ascending=[True])
                 else:
-                    f_df = f_df.sort_values(by=["Organismo", "Title"], ascending=[True, True])
+                    f_df_word = f_df.sort_values(by=["Organismo", "Title"], ascending=[True, True])
                     
-                f_df = f_df[['Categoría', 'Organismo', 'Title', 'Link']]
-                f_df = f_df.rename(columns={"Categoría": "Tipo de Documento", "Title": "Nombre de Documento"})
+                f_df_word = f_df_word[['Categoría', 'Organismo', 'Title', 'Link']]
+                f_df_word = f_df_word.rename(columns={"Categoría": "Tipo de Documento", "Title": "Nombre de Documento"})
                 
                 st.success(f"Se encontraron **{len(f_df)}** documentos.")
-                word_file = generate_word(f_df, title=f"Explorador - {tipo_doc}")
+                word_file = generate_word(f_df_word, title=f"Explorador - {tipo_doc}")
                 st.download_button("📄 Descargar en Word", data=word_file, file_name=f"Explorador_{tipo_doc}.docx")
                 
-                # Previsualización en pantalla
+                # --- PREPARACIÓN PARA LA VISTA PREVIA (Orden Cronológico + Columna Fecha) ---
                 disp = f_df.copy()
-                disp["Nombre de Documento"] = disp.apply(lambda x: f"[{x['Nombre de Documento']}]({x['Link']})", axis=1)
+                disp = disp.sort_values(by="Date", ascending=False) # Orden cronológico
+                disp["Fecha"] = disp["Date"].dt.strftime('%d/%m/%Y') # Formatear fecha
+                disp["Nombre de Documento"] = disp.apply(lambda x: f"[{x['Title']}]({x['Link']})", axis=1)
+                disp = disp.rename(columns={"Categoría": "Tipo de Documento"})
                 
-                cols_vis = ["Tipo de Documento", "Organismo", "Nombre de Documento"] if organismo_seleccionado == "Todos" else ["Tipo de Documento", "Nombre de Documento"]
+                # Mostrar en pantalla según si se seleccionó 'Todos' o un organismo específico
+                if organismo_seleccionado == "Todos":
+                    cols_vis = ["Fecha", "Tipo de Documento", "Organismo", "Nombre de Documento"] 
+                else:
+                    cols_vis = ["Fecha", "Tipo de Documento", "Nombre de Documento"]
+                    
                 st.markdown(disp[cols_vis].to_markdown(index=False), unsafe_allow_html=True)
             else: 
                 st.warning("No se encontraron documentos para las fechas seleccionadas.")
