@@ -1318,6 +1318,82 @@ def load_investigacion_bm(start_date_str, end_date_str):
     return df
 # --- SECCIÓN: DISCURSOS ---
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
+def load_discursos_fmi(start_date_str, end_date_str):
+    """Extractor FMI - Discursos (Vía Coveo API) con Limpieza Avanzada"""
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+    except:
+        start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+
+    rows = []
+    url = "https://imfproduction561s308u.org.coveo.com/rest/search/v2?organizationId=imfproduction561s308u"
+    headers = {
+        "Authorization": "Bearer xx742a6c66-f427-4f5a-ae1e-770dc7264e8a",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Origin": "https://www.imf.org",
+        "Referer": "https://www.imf.org/",
+        "User-Agent": "Mozilla/5.0"
+    }
+    payload = {"aq": "@imftype==\"Speech\" AND @syslanguage==\"English\"", "numberOfResults": 150, "sortCriteria": "@imfdate descending"}
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            for item in data.get("results", []):
+                titulo_raw = item.get("title", "").strip()
+                link = item.get("clickUri", "")
+                raw_data = item.get("raw", {})
+                raw_date = raw_data.get("date")
+                
+                # Extraemos el autor
+                autor = raw_data.get("imfspeaker", "")
+                if isinstance(autor, list) and len(autor) > 0: autor = autor[0]
+                autor = clean_author_name(autor)
+                
+                parsed_date = None
+                if raw_date:
+                    try: parsed_date = datetime.datetime.fromtimestamp(raw_date / 1000.0)
+                    except: pass
+                if not titulo_raw or not link or not parsed_date: continue
+                
+                # ---------------------------------------------------------
+                # LIMPIEZA NIVEL DIOS (Adiós comillas y subtítulos largos)
+                # ---------------------------------------------------------
+                titulo_limpio = titulo_raw
+                
+                # 1. Quitar la "cola" institucional (ej: " - Keynote Speech by...")
+                patron_sufijo = re.compile(r"(?i)\s*[\-–—]\s*.*?(speech|remarks|statement|address)\s+by\s+.*$")
+                titulo_limpio = patron_sufijo.sub("", titulo_limpio).strip()
+                
+                # 2. Quitar comillas sobrantes que hayan quedado expuestas
+                titulo_limpio = titulo_limpio.strip('"').strip("'").strip()
+                
+                # 3. Formatear "Autor: Título" evitando duplicados
+                if autor:
+                    patron_inicio = re.compile(rf"^{re.escape(autor)}\s*[:\-]\s*", re.IGNORECASE)
+                    titulo_limpio = patron_inicio.sub("", titulo_limpio).strip('"').strip("'").strip()
+                    titulo_final = f"{autor}: {titulo_limpio}"
+                else:
+                    titulo_final = titulo_limpio
+                # ---------------------------------------------------------
+
+                if start_date <= parsed_date <= end_date:
+                    if not any(r['Link'] == link for r in rows):
+                        rows.append({"Date": parsed_date, "Title": titulo_final, "Link": link, "Organismo": "FMI"})
+    except: pass
+    
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date", ascending=False)
+    return df
+
+@st.cache_data(show_spinner=False)
 def load_data_ecb(start_date_str, end_date_str):
     headers = {'User-Agent': 'Mozilla/5.0'}
     rows = []
@@ -1776,7 +1852,7 @@ meses_dict = {
 }
 
 # --- LISTAS DINÁMICAS DE ORGANISMOS ---
-orgs_discursos = ["BBk (Alemania)", "BdE (España)", "BdF (Francia)", "BM", "BoC (Canadá)", "BoJ (Japón)", "BPI", "CEF", "ECB (Europa)", "Fed (Estados Unidos)", "PBoC (China)"]
+orgs_discursos = ["BBk (Alemania)", "BdE (España)", "BdF (Francia)", "BM", "BoC (Canadá)", "BoJ (Japón)", "BPI", "CEF", "ECB (Europa)", "Fed (Estados Unidos)", "FMI", "PBoC (China)"]
 orgs_reportes = ["BID", "BM", "BPI", "CEF", "FEM", "OCDE"]
 orgs_pub_inst = ["BM", "BPI", "CEF", "CEMLA", "FMI", "G20", "OCDE", "OEI"] 
 orgs_investigacion = ["BID", "BM", "BPI", "CEMLA", "FMI", "OCDE"]
@@ -1812,6 +1888,7 @@ if modo_app == "Boletín":
                 try:
                     if org == "BPI": df = load_data_bis()
                     elif org == "ECB (Europa)": df = load_data_ecb(sd, ed)
+                    elif org == "FMI": df = load_discursos_fmi(sd, ed)
                     elif org == "BBk (Alemania)": df = load_data_bbk(sd, ed)
                     elif org == "Fed (Estados Unidos)": df = load_data_fed(a_num)
                     elif org == "BdF (Francia)": df = load_data_bdf(sd, ed)
@@ -1989,11 +2066,19 @@ elif modo_app == "Categorías":
                         elif o == "BoC (Canadá)": df = load_data_boc(sd, ed)
                         elif o == "BoJ (Japón)": df = load_data_boj(sd, ed)
                         elif o == "CEF": df = load_data_cef(sd, ed)
+                        elif o == "FMI": df = load_discursos_fmi(sd, ed) # <--- AQUÍ ESTÁ EL FMI
                         elif o == "PBoC (China)": df = load_data_pboc(sd, ed)
                     
                     elif tipo_doc == "Reportes":
-                        if o == "BID": df = load_reportes_bid(sd, ed)
-                        elif o == "BM": df = load_reportes_bm(sd, ed) # <--- AGRÉGALO AQUÍ
+                        if o == "BID": 
+                            dfs_bid = []
+                            try: dfs_bid.append(load_reportes_bid(sd, ed))
+                            except: pass
+                            try: dfs_bid.append(load_reportes_bid_en(sd, ed))
+                            except: pass
+                            dfs_bid = [d for d in dfs_bid if not d.empty]
+                            if dfs_bid: df = pd.concat(dfs_bid, ignore_index=True).drop_duplicates(subset=['Link'])
+                        elif o == "BM": df = load_reportes_bm(sd, ed)
                         elif o == "BPI": df = load_reportes_bpi(sd, ed)
                         elif o == "CEF": df = load_reportes_cef(sd, ed)
                         elif o == "OCDE": df = load_reportes_ocde(sd, ed)
@@ -2005,11 +2090,8 @@ elif modo_app == "Categorías":
                             except: pass
                             try: dfs_bid.append(load_investigacion_bid_en(sd, ed))
                             except: pass
-                            
                             dfs_bid = [d for d in dfs_bid if not d.empty]
-                            if dfs_bid: 
-                                df = pd.concat(dfs_bid, ignore_index=True).drop_duplicates(subset=['Link'])
-                                
+                            if dfs_bid: df = pd.concat(dfs_bid, ignore_index=True).drop_duplicates(subset=['Link'])
                         elif o == "BPI": df = load_investigacion_bpi(sd, ed)
                         elif o == "BM": df = load_investigacion_bm(sd, ed)
                         
@@ -2018,12 +2100,10 @@ elif modo_app == "Categorías":
                         elif o == "CEF": df = load_pub_inst_cef(sd, ed)
                         elif o == "BM": df = load_pub_inst_bm(sd, ed)
                         elif o == "FMI": 
-                            # Extraemos ambas fuentes de datos para el FMI
                             df_flagships = load_pub_inst_fmi(sd, ed)
                             df_prs = load_press_releases_fmi(sd, ed)
-                            
-                            # Juntamos las tablas de forma segura
-                            dfs_a_unir = [d for d in [df_flagships, df_prs] if not d.empty]
+                            df_crs = load_country_reports_fmi(sd, ed)
+                            dfs_a_unir = [d for d in [df_flagships, df_prs, df_crs] if not d.empty]
                             if dfs_a_unir:
                                 df = pd.concat(dfs_a_unir, ignore_index=True)
                                 df = df.sort_values("Date", ascending=False)
