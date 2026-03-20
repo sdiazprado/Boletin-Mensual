@@ -1529,7 +1529,7 @@ def load_investigacion_bid(start_date_str, end_date_str):
 
 @st.cache_data(show_spinner=False)
 def load_investigacion_fmi(start_date_str, end_date_str):
-    """Extractor FMI - Blogs de Investigación (Vía Coveo API con llave exacta)"""
+    """Extractor FMI - Blogs de Investigación (Vía Coveo API con llave exacta, SOLO TÍTULO)"""
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
         end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
@@ -1549,7 +1549,7 @@ def load_investigacion_fmi(start_date_str, end_date_str):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
-    # 👇 LA LLAVE MAESTRA DESCUBIERTA: IMF Blog Page 👇
+    # LA LLAVE MAESTRA DESCUBIERTA: IMF Blog Page
     payload = {
         "aq": "@imftype==\"IMF Blog Page\" AND @syslanguage==\"English\"",
         "numberOfResults": 150,
@@ -1561,26 +1561,13 @@ def load_investigacion_fmi(start_date_str, end_date_str):
         if res.status_code == 200:
             data = res.json()
             for item in data.get("results", []):
-                titulo_raw = item.get("title", "").strip()
+                # Extraemos el título y lo limpiamos de comillas o espacios sobrantes
+                titulo_limpio = item.get("title", "").strip().strip('"').strip("'").strip()
                 link = item.get("clickUri", "")
+                
+                # Extraemos la fecha matemática de Coveo
                 raw_data = item.get("raw", {})
                 raw_date = raw_data.get("date")
-
-                # 1. Cazador de Autores para Blogs
-                autor = raw_data.get("imfauthor", "")
-                if not autor:
-                    autor = raw_data.get("sysauthor", "")
-                if not autor:
-                    autor = raw_data.get("imfspeaker", "")
-
-                if isinstance(autor, list) and len(autor) > 0:
-                    autor = autor[0]
-
-                # Limpiar y dejar solo al primer autor si hay varios
-                if autor:
-                    autor = re.split(r'\s+and\s+|\s*&\s*', autor, flags=re.IGNORECASE)[0].strip()
-                    autor = autor.split(',')[0].strip()
-                    autor = clean_author_name(autor)
 
                 parsed_date = None
                 if raw_date:
@@ -1589,36 +1576,21 @@ def load_investigacion_fmi(start_date_str, end_date_str):
                     except:
                         pass
                 
-                if not titulo_raw or not link or not parsed_date:
+                # Si falta el título, el enlace o la fecha, descartamos el elemento
+                if not titulo_limpio or not link or not parsed_date:
                     continue
 
-                # 2. Formato Estricto "Autor: Título"
-                titulo_limpio = titulo_raw.strip('"').strip("'").strip()
-
-                if autor:
-                    if titulo_limpio.lower().startswith(f"{autor.lower()},"):
-                        titulo_final = re.sub(rf"(?i)^{re.escape(autor)},", f"{autor}:", titulo_limpio)
-                    elif titulo_limpio.lower().startswith(f"{autor.lower()}:"):
-                        titulo_final = titulo_limpio
-                    elif titulo_limpio.lower().startswith(autor.lower()):
-                        titulo_final = re.sub(rf"(?i)^{re.escape(autor)}\s*", f"{autor}: ", titulo_limpio)
-                    elif autor.lower() not in titulo_limpio.lower():
-                        titulo_final = f"{autor}: {titulo_limpio}"
-                    else:
-                        titulo_final = titulo_limpio
-                else:
-                    titulo_final = titulo_limpio
-
+                # Filtrar por fechas
                 if start_date <= parsed_date <= end_date:
                     if not any(r['Link'] == link for r in rows):
                         rows.append({
                             "Date": parsed_date, 
-                            "Title": titulo_final, 
+                            "Title": titulo_limpio, # <--- Se envía el título crudo sin autor
                             "Link": link, 
                             "Organismo": "FMI"
                         })
-    except:
-        pass
+    except Exception as e:
+        pass # Silencioso para no romper la aplicación
 
     df = pd.DataFrame(rows)
     if not df.empty:
