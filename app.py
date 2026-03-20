@@ -1203,6 +1203,76 @@ def load_pub_inst_bm(start_date_str, end_date_str):
 
     # --- SECCIÓN: INVESTIGACIÓN ---
 @st.cache_data(show_spinner=False)
+def load_working_papers_fmi(start_date_str, end_date_str):
+    """Extractor FMI - Working Papers (Conexión Directa Coveo API mediante @imfseries)"""
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+    except:
+        start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+
+    rows = []
+    url = "https://imfproduction561s308u.org.coveo.com/rest/search/v2?organizationId=imfproduction561s308u"
+
+    headers = {
+        "Authorization": "Bearer xx742a6c66-f427-4f5a-ae1e-770dc7264e8a",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Origin": "https://www.imf.org",
+        "Referer": "https://www.imf.org/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+
+    # Búsqueda exacta por la serie "IMF Working Papers"
+    payload = {
+        "aq": "@imfseries==\"IMF Working Papers\" AND @syslanguage==\"English\"",
+        "numberOfResults": 150,
+        "sortCriteria": "@imfdate descending"
+    }
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=15)
+
+        if res.status_code == 200:
+            data = res.json()
+
+            for item in data.get("results", []):
+                titulo = item.get("title", "").strip()
+                link = item.get("clickUri", "")
+
+                # Extraer Fecha (De milisegundos Unix a Datetime normal)
+                raw_date = item.get("raw", {}).get("date")
+                parsed_date = None
+                
+                if raw_date:
+                    try:
+                        parsed_date = datetime.datetime.fromtimestamp(raw_date / 1000.0)
+                    except:
+                        pass
+
+                if not titulo or not link or not parsed_date:
+                    continue
+
+                # Filtrar por el rango de fechas de la app
+                if start_date <= parsed_date <= end_date:
+                    if not any(r['Link'] == link for r in rows):
+                        rows.append({
+                            "Date": parsed_date, 
+                            "Title": titulo, 
+                            "Link": link, 
+                            "Organismo": "FMI"
+                        })
+    except Exception as e:
+        pass # Silencioso para no romper la app principal
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date", ascending=False)
+    return df
+
+@st.cache_data(show_spinner=False)
 def load_investigacion_bid_en(start_date_str, end_date_str):
     """
     Extrae Working Papers del BID en inglés de forma DINÁMICA
@@ -1457,10 +1527,9 @@ def load_investigacion_bid(start_date_str, end_date_str):
     
     return df
 
-
 @st.cache_data(show_spinner=False)
 def load_investigacion_fmi(start_date_str, end_date_str):
-    """Extractor FMI - Blogs de Investigación (Vía Coveo API)"""
+    """Extractor FMI - Blogs de Investigación (Vía Coveo API Blindada)"""
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
         end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
@@ -1470,17 +1539,20 @@ def load_investigacion_fmi(start_date_str, end_date_str):
 
     rows = []
     url = "https://imfproduction561s308u.org.coveo.com/rest/search/v2?organizationId=imfproduction561s308u"
+    
     headers = {
         "Authorization": "Bearer xx742a6c66-f427-4f5a-ae1e-770dc7264e8a",
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Origin": "https://www.imf.org",
         "Referer": "https://www.imf.org/",
-        "User-Agent": "Mozilla/5.0"
+        # 👇 MÁSCARA COMPLETA ANTI-BLOQUEO 👇
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" 
     }
 
+    # 👇 RED DE BÚSQUEDA AMPLIADA 👇
     payload = {
-        "aq": "@imftype==\"Blog Page\" AND @syslanguage==\"English\"",
+        "aq": "(@imftype==\"Blog Page\" OR @imfcontenttype==\"Blogs\") AND @syslanguage==\"English\"",
         "numberOfResults": 150,
         "sortCriteria": "@imfdate descending"
     }
@@ -1507,19 +1579,17 @@ def load_investigacion_fmi(start_date_str, end_date_str):
 
                 # Limpiar y dejar solo al primer autor si hay varios
                 if autor:
-                    autor = re.split(r'\s+and\s+|\s*&\s*', autor,
-                                     flags=re.IGNORECASE)[0].strip()
-                    # Corta en la primera coma
+                    autor = re.split(r'\s+and\s+|\s*&\s*', autor, flags=re.IGNORECASE)[0].strip()
                     autor = autor.split(',')[0].strip()
                     autor = clean_author_name(autor)
 
                 parsed_date = None
                 if raw_date:
                     try:
-                        parsed_date = datetime.datetime.fromtimestamp(
-                            raw_date / 1000.0)
+                        parsed_date = datetime.datetime.fromtimestamp(raw_date / 1000.0)
                     except:
                         pass
+                
                 if not titulo_raw or not link or not parsed_date:
                     continue
 
@@ -1528,13 +1598,11 @@ def load_investigacion_fmi(start_date_str, end_date_str):
 
                 if autor:
                     if titulo_limpio.lower().startswith(f"{autor.lower()},"):
-                        titulo_final = re.sub(
-                            rf"(?i)^{re.escape(autor)},", f"{autor}:", titulo_limpio)
+                        titulo_final = re.sub(rf"(?i)^{re.escape(autor)},", f"{autor}:", titulo_limpio)
                     elif titulo_limpio.lower().startswith(f"{autor.lower()}:"):
                         titulo_final = titulo_limpio
                     elif titulo_limpio.lower().startswith(autor.lower()):
-                        titulo_final = re.sub(
-                            rf"(?i)^{re.escape(autor)}\s*", f"{autor}: ", titulo_limpio)
+                        titulo_final = re.sub(rf"(?i)^{re.escape(autor)}\s*", f"{autor}: ", titulo_limpio)
                     elif autor.lower() not in titulo_limpio.lower():
                         titulo_final = f"{autor}: {titulo_limpio}"
                     else:
@@ -1544,8 +1612,12 @@ def load_investigacion_fmi(start_date_str, end_date_str):
 
                 if start_date <= parsed_date <= end_date:
                     if not any(r['Link'] == link for r in rows):
-                        rows.append(
-                            {"Date": parsed_date, "Title": titulo_final, "Link": link, "Organismo": "FMI"})
+                        rows.append({
+                            "Date": parsed_date, 
+                            "Title": titulo_final, 
+                            "Link": link, 
+                            "Organismo": "FMI"
+                        })
     except:
         pass
 
@@ -1554,7 +1626,6 @@ def load_investigacion_fmi(start_date_str, end_date_str):
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
     return df
-
 
 @st.cache_data(show_spinner=False)
 def load_investigacion_bm(start_date_str, end_date_str):
@@ -2565,7 +2636,24 @@ if modo_app == "Boletín":
                         if dfs_bid: df = pd.concat(dfs_bid, ignore_index=True).drop_duplicates(subset=['Link'])
                     elif org == "BPI": df = load_investigacion_bpi(sd, ed)
                     elif org == "BM": df = load_investigacion_bm(sd, ed)
-                    elif org == "FMI": df = load_investigacion_fmi(sd, ed) # <--- AQUÍ SE AÑADE
+                    elif org == "FMI": 
+                        df_blogs = pd.DataFrame()
+                        df_wp = pd.DataFrame()
+                        
+                        try:
+                            df_blogs = load_investigacion_fmi(sd, ed)
+                        except: pass
+                        
+                        try:
+                            df_wp = load_working_papers_fmi(sd, ed)
+                        except: pass
+                        
+                        # Unimos Blogs y Working Papers
+                        dfs_a_unir = [d for d in [df_blogs, df_wp] if not d.empty]
+                        if dfs_a_unir:
+                            df = pd.concat(dfs_a_unir, ignore_index=True)
+                            df = df.drop_duplicates(subset=['Link'])
+                            df = df.sort_values("Date", ascending=False)
                 except Exception as e: pass
 
                 if not df.empty:
@@ -2750,7 +2838,22 @@ elif modo_app == "Categorías":
                             df = load_investigacion_bpi(sd, ed)
                         elif o == "BM":
                             df = load_investigacion_bm(sd, ed)
-
+                        elif o == "BPI":
+                            df = load_investigacion_bpi(sd, ed)
+                        elif o == "BM":
+                            df = load_investigacion_bm(sd, ed)
+                            
+                        # 👇 ¡AQUÍ ESTÁ EL QUE FALTABA! 👇
+                        elif o == "FMI": 
+                            df_blogs, df_wp = pd.DataFrame(), pd.DataFrame()
+                            try: df_blogs = load_investigacion_fmi(sd, ed)
+                            except: pass
+                            try: df_wp = load_working_papers_fmi(sd, ed)
+                            except: pass
+                            
+                            dfs_fmi = [d for d in [df_blogs, df_wp] if not d.empty]
+                            if dfs_fmi:
+                                df = pd.concat(dfs_fmi, ignore_index=True).drop_duplicates(subset=['Link']).sort_values("Date", ascending=False)
                     elif tipo_doc == "Publicaciones Institucionales":
                         if o == "BPI":
                             df = load_pub_inst_bpi(sd, ed)
