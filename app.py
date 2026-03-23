@@ -1,3 +1,4 @@
+
 import streamlit as st
 import requests
 import pandas as pd
@@ -164,6 +165,85 @@ def procesar_texto_pegado(texto_crudo, organismo_nombre):
         df = df.sort_values(by="Date", ascending=False).drop_duplicates(subset=['Title'])
     return df
 
+def buscar_link_boe(titulo):
+    """Busca silenciosamente en la web para obtener el Link Directo y Oficial del BoE"""
+    import urllib.parse
+    import requests
+    from bs4 import BeautifulSoup
+    import re
+    
+    # Extraemos solo el título limpio sin el autor para la búsqueda
+    titulo_limpio = titulo.split(': ')[-1] if ': ' in titulo else titulo
+    titulo_limpio = re.sub(r'[^a-zA-Z0-9\s]', '', titulo_limpio)
+    
+    # Usamos DuckDuckGo HTML para evadir bloqueos y obtener el link oficial sin usar Google
+    query = f"site:bankofengland.co.uk/speech {titulo_limpio}"
+    url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=8)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # Atrapamos el link real de los resultados
+        for a in soup.find_all('a', class_='result__url'):
+            href = a.get('href', '').strip()
+            if 'bankofengland.co.uk/speech' in href:
+                if not href.startswith('http'):
+                    href = 'https://' + href
+                return href
+    except:
+        pass
+        
+    # Fallback de emergencia (1 clic)
+    google_query = urllib.parse.quote(query)
+    return f"https://www.google.com/search?q={google_query}"
+
+def procesar_texto_pegado_boe(texto_crudo):
+    """Extractor especializado para el formato del Bank of England (BoE)"""
+    rows = []
+    lineas = [linea.strip() for linea in texto_crudo.split('\n') if linea.strip()]
+    patron_fecha = r'(\d{1,2}\s+[A-Za-z]{3,}\s+\d{4})'
+    
+    i = 0
+    while i < len(lineas):
+        match_fecha = re.search(patron_fecha, lineas[i])
+        if match_fecha:
+            try:
+                parsed_date = parser.parse(match_fecha.group(1))
+            except:
+                i += 1; continue
+            
+            # 1. Buscar Autor un renglón ARRIBA (ej. "Speech // Phil Evans")
+            autor = ""
+            if i >= 1 and "//" in lineas[i-1]:
+                partes = lineas[i-1].split("//")
+                if len(partes) > 1:
+                    autor = clean_author_name(partes[1].strip())
+            
+            # 2. Buscar Título Completo dos renglones ABAJO
+            titulo = ""
+            if i + 2 < len(lineas):
+                titulo_raw = lineas[i+2]
+                # Le quitamos el sufijo redundante " - speech by Autor"
+                titulo_raw = re.sub(r'(?i)\s*[\-–—]\s*speech\s+by\s+.*$', '', titulo_raw).strip()
+                titulo = titulo_raw
+            
+            # 3. Ensamblar y Guardar
+            if titulo:
+                titulo_final = f"{autor}: {titulo}" if autor else titulo
+                rows.append({
+                    "Date": parsed_date, 
+                    "Title": titulo_final,
+                    "Link": "Pendiente",
+                    "Organismo": "BoE (Inglaterra)"
+                })
+        i += 1
+        
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(by="Date", ascending=False).drop_duplicates(subset=['Title'])
+    return df
 def clean_author_name(name):
     if not name: return ""
     minusc = ['de', 'van', 'von', 'der', 'del', 'la']
@@ -3289,24 +3369,27 @@ elif modo_app == "Carga Manual":
     st.markdown("---")
     st.subheader("Cajas de Extracción")
 
-    # Función auxiliar para crear cada caja repetitiva (¡AHORA CON LINKS!)
+    # Función auxiliar para crear cada caja repetitiva (AHORA CON SWITCH BOE)
     def crear_caja_manual(titulo_caja, categoria_doc, organismo_nombre, url_fuente=None):
         with st.expander(f"📥 Cargar: {titulo_caja}", expanded=True):
             
-            # Mostrar el link de manera destacada si existe
             if url_fuente:
-                st.markdown(f"**[Link {titulo_caja}]({url_fuente})**")
+                st.markdown(f" **[Link {titulo_caja}]({url_fuente})**")
                 
             texto = st.text_area(f"Copia el texto de la página y pégalo aquí (Ctrl+A, Ctrl+C, Ctrl+V):", height=150, key=f"txt_{titulo_caja}")
             
             col_btn1, col_btn2 = st.columns([1, 1])
             
-            # Botón 1: Previsualizar
             if col_btn1.button(f"🔍 Previsualizar {titulo_caja}", key=f"btn_prev_{titulo_caja}"):
                 if texto:
-                    with st.spinner("Procesando y buscando links (DOI)..."):
-                        # Usamos la función procesadora universal de OCDE por ahora
-                        df_bruto = procesar_texto_pegado(texto, organismo_nombre)
+                    with st.spinner("Procesando y buscando links..."):
+                        
+                        # --- SWITCH DE LÓGICA DE EXTRACCIÓN ---
+                        if organismo_nombre == "BoE (Inglaterra)":
+                            df_bruto = procesar_texto_pegado_boe(texto)
+                        else:
+                            df_bruto = procesar_texto_pegado(texto, organismo_nombre)
+                            
                         if not df_bruto.empty:
                             df_filtrado = df_bruto[
                                 (df_bruto['Date'].dt.month == mes_manual) & 
@@ -3316,19 +3399,23 @@ elif modo_app == "Carga Manual":
                             if not df_filtrado.empty:
                                 for idx in df_filtrado.index:
                                     t = df_filtrado.loc[idx, "Title"]
-                                    df_filtrado.loc[idx, "Link"] = buscar_link_inteligente(t, organismo_nombre)
+                                    
+                                    # --- SWITCH DE LÓGICA DE LINKS ---
+                                    if organismo_nombre == "BoE (Inglaterra)":
+                                        df_filtrado.loc[idx, "Link"] = buscar_link_boe(t)
+                                    else:
+                                        df_filtrado.loc[idx, "Link"] = buscar_link_inteligente(t, organismo_nombre)
                                 
                                 df_filtrado['Categoría'] = categoria_doc
                                 st.session_state[f"temp_{titulo_caja}"] = df_filtrado
                                 
-                                st.success(f"Se encontraron {len(df_filtrado)} reportes.")
+                                st.success(f"Se encontraron {len(df_filtrado)} documentos de {mes_manual} {año_manual}.")
                                 st.dataframe(df_filtrado, use_container_width=True)
                             else:
-                                st.warning("No hay coincidencias con el mes y año.")
+                                st.warning("No hay coincidencias con el mes y año seleccionados.")
                 else:
                     st.error("Pega el texto primero.")
             
-            # Botón 2: Agregar a Descarga
             if col_btn2.button(f"➕ Agregar a Descarga Final", type="primary", key=f"btn_add_{titulo_caja}"):
                 if f"temp_{titulo_caja}" in st.session_state and not st.session_state[f"temp_{titulo_caja}"].empty:
                     st.session_state.cargas_validadas[titulo_caja] = st.session_state[f"temp_{titulo_caja}"]
@@ -3338,18 +3425,16 @@ elif modo_app == "Carga Manual":
                 else:
                     st.error("Primero debes Previsualizar y obtener resultados.")
 
-    # 3. CREAR LAS 4 CAJAS (INYECCIÓN DE LINKS)
+    # 3. CREAR LAS 4 CAJAS (CON TODOS LOS LINKS OFICIALES)
     link_ocde_rep = "https://www.oecd.org/en/search/publications.html?orderBy=mostRecent&page=0&facetTags=oecd-content-types%3Apublications%2Freports%2Coecd-languages%3Aen&minPublicationYear=2026&maxPublicationYear=2026"
     link_ocde_pub = "https://www.oecd.org/en/search.html?orderBy=mostRecent&page=0&facetTags=oecd-policy-subissues%3Apsi114%2Coecd-languages%3Aen"
     link_ocde_inv = "https://www.oecd.org/en/publications/reports.html?orderBy=mostRecent&page=0&facetTags=oecd-content-types%3Apublications%2Fworking-papers%2Coecd-languages%3Aen"
+    link_boe_disc = "https://www.bankofengland.co.uk/news/speeches"
     
     crear_caja_manual("OCDE (Reportes)", "Reportes", "OCDE", link_ocde_rep)
     crear_caja_manual("OCDE (Pub. Institucionales)", "Publicaciones Institucionales", "OCDE", link_ocde_pub)
     crear_caja_manual("OCDE (Investigación)", "Investigación", "OCDE", link_ocde_inv)
-    
-    # Para el BoE lo dejamos en blanco (None) temporalmente hasta que tengamos el link
-    crear_caja_manual("BoE (Discursos)", "Discursos", "BoE (Inglaterra)", None)
-
+    crear_caja_manual("BoE (Discursos)", "Discursos", "BoE (Inglaterra)", link_boe_disc)
     # 4. BOTÓN DE DESCARGA MAESTRA
     st.markdown("---")
     st.subheader("Exportación Final")
