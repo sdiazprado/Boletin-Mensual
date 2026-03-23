@@ -74,23 +74,6 @@ st.markdown("""
 # ==========================================
 # UTILIDADES DE FORMATO
 # ==========================================
-
-def clean_author_name(name):
-    if not name: return ""
-    minusc = ['de', 'van', 'von', 'der', 'del', 'la']
-    words = name.strip().split()
-    
-    # Capitaliza todo excepto las preposiciones europeas
-    cleaned_words = [w.capitalize() if w.lower() not in minusc else w.lower() for w in words]
-    if cleaned_words:
-        cleaned_words[0] = cleaned_words[0].capitalize() # La primera siempre mayúscula
-        
-    cleaned = " ".join(cleaned_words)
-    # Arreglar iniciales pegadas (ej. "J.M. Keynes" -> "J. M. Keynes")
-    cleaned = re.sub(r'\b([A-Z])\.\s*([A-Z])', lambda m: f"{m.group(1)}. {m.group(2)}", cleaned)
-    return cleaned
-
-
 # ==========================================
 # HERRAMIENTA DE RESCATE (TEXTO MANUAL)
 # ==========================================
@@ -102,12 +85,12 @@ def buscar_link_inteligente(titulo, organismo):
     import time
     import re
 
-    # 1. Limpieza base: Quitamos todo después de ':' o '-' para tener la raíz fuerte del reporte
+    # 1. Limpieza base
     titulo_raiz = re.split(r'[:\-]', titulo)[0].strip()
     titulo_limpio = re.sub(r'[^a-zA-Z0-9\s]', '', titulo_raiz)
     
     headers = {'User-Agent': 'mailto:bot_investigacion@banco.com'}
-    time.sleep(0.5) # Respetar el límite de velocidad de la API
+    time.sleep(0.5) 
 
     def consultar_api(query_param, texto_busqueda, modo_estricto=True):
         query_enc = urllib.parse.quote(texto_busqueda)
@@ -125,35 +108,24 @@ def buscar_link_inteligente(titulo, organismo):
                     pub = item.get('publisher', '').lower()
                     titulo_api = item.get('title', [''])[0].lower()
                     
-                    # Modo Estricto: Exigimos que la editorial coincida
                     if modo_estricto:
                         if 'oecd' in pub or 'organisation' in pub or organismo.lower() in pub:
                             return url_oficial
-                    
-                    # Modo Fuzzy (Rescate): Si la editorial está mal registrada, 
-                    # pero el título de la API contiene gran parte de nuestro título, lo damos por bueno.
                     else:
                         titulo_comparar = titulo_limpio.lower()
-                        # Si más del 70% del título base coincide, es el mismo documento
                         if titulo_comparar in titulo_api or titulo_api in titulo_comparar:
                             return url_oficial
         except:
             pass
         return None
 
-    # --- ATAQUE 1: Búsqueda por Título Raíz (Estricto) ---
     link = consultar_api("query.title", titulo_limpio, modo_estricto=True)
     if link: return link
 
-    # --- ATAQUE 2: Búsqueda Bibliográfica Completa (Fuzzy/Difuso) ---
-    # Si falló el ataque 1, lanzamos el título completo tal cual viene en la web
-    # y relajamos el filtro de editorial por si lo registraron raro.
-    time.sleep(0.5) # Pausa entre re-intentos
+    time.sleep(0.5)
     link = consultar_api("query.bibliographic", titulo, modo_estricto=False)
     if link: return link
 
-    # Si realmente no existe en la base global (rarísimo), lo dejamos en blanco 
-    # para que tu Word se exporte sin errores y en texto normal.
     return ""
 
 def procesar_texto_pegado(texto_crudo, organismo_nombre):
@@ -180,7 +152,7 @@ def procesar_texto_pegado(texto_crudo, organismo_nombre):
             
             if titulo and len(titulo) > 10 and not any(b in titulo.lower() for b in ['search', 'filter', 'sort by', 'publications']):
                 rows.append({
-                    "Date": parsed_date, # Formato datetime real para tu app
+                    "Date": parsed_date, 
                     "Title": titulo,
                     "Link": "Pendiente",
                     "Organismo": organismo_nombre
@@ -191,6 +163,21 @@ def procesar_texto_pegado(texto_crudo, organismo_nombre):
     if not df.empty:
         df = df.sort_values(by="Date", ascending=False).drop_duplicates(subset=['Title'])
     return df
+
+def clean_author_name(name):
+    if not name: return ""
+    minusc = ['de', 'van', 'von', 'der', 'del', 'la']
+    words = name.strip().split()
+    
+    # Capitaliza todo excepto las preposiciones europeas
+    cleaned_words = [w.capitalize() if w.lower() not in minusc else w.lower() for w in words]
+    if cleaned_words:
+        cleaned_words[0] = cleaned_words[0].capitalize() # La primera siempre mayúscula
+        
+    cleaned = " ".join(cleaned_words)
+    # Arreglar iniciales pegadas (ej. "J.M. Keynes" -> "J. M. Keynes")
+    cleaned = re.sub(r'\b([A-Z])\.\s*([A-Z])', lambda m: f"{m.group(1)}. {m.group(2)}", cleaned)
+    return cleaned
 
 
 # ==========================================
@@ -2779,7 +2766,7 @@ except:
 st.sidebar.markdown("---")
 st.sidebar.header("Menú de Navegación")
 modo_app = st.sidebar.radio(
-    "", ["Boletín", "Categorías"], key="menu_principal")
+    "", ["Boletín", "Categorías", "Carga Manual"], key="menu_principal")
 st.sidebar.markdown("---")
 
 anios_str = ["2026", "2025", "2024", "2023", "2022"]
@@ -2805,56 +2792,6 @@ if modo_app == "Boletín":
     m_sel = c1.multiselect("Mes(es)", options=list(meses_dict.keys()))
     a_sel = c2.multiselect("Año(s)", options=anios_str, default=["2026"])
 
-    # ========================================================
-    # UI: HERRAMIENTA DE RESCATE (TEXTO MANUAL)
-    # ========================================================
-    st.markdown("---")
-    with st.expander("🛠️ Herramienta de Rescate: Extracción por Texto Pegado", expanded=False):
-        st.info("Usa esto si alguna página (como la OCDE) falla. Pega el texto crudo (Ctrl+A, Ctrl+C).")
-        
-        col_txt, col_ctrl = st.columns([2, 1])
-        with col_txt:
-            texto_manual = st.text_area("Texto crudo de la web:", height=150)
-        with col_ctrl:
-            org_manual = st.selectbox("Organismo a rescatar:", ["OCDE", "FEM", "BID", "BM", "FMI", "CEF", "BPI", "Otro"])
-            mes_manual = st.selectbox("Mes objetivo:", [1,2,3,4,5,6,7,8,9,10,11,12], index=datetime.datetime.now().month-1, format_func=lambda x: calendar.month_name[x].capitalize())
-            año_manual = st.number_input("Año objetivo:", min_value=2020, max_value=2030, value=datetime.datetime.now().year)
-
-        if st.button("Procesar y Buscar Links Oficiales"):
-            if texto_manual:
-                with st.spinner("Procesando texto y buscando links..."):
-                    df_manual = procesar_texto_pegado(texto_manual, org_manual)
-                    
-                    if not df_manual.empty:
-                        # Filtramos exactamente por el mes y año que indicaste
-                        df_filtrado = df_manual[
-                            (df_manual['Date'].dt.month == mes_manual) & 
-                            (df_manual['Date'].dt.year == año_manual)
-                        ].copy()
-                        
-                        if not df_filtrado.empty:
-                            # Buscamos los links solo de los filtrados
-                            for idx in df_filtrado.index:
-                                titulo_actual = df_filtrado.loc[idx, "Title"]
-                                df_filtrado.loc[idx, "Link"] = buscar_link_inteligente(titulo_actual, org_manual)
-                            
-                            # Asignamos la categoría para que embone en el Word
-                            df_filtrado['Categoría'] = "Reportes" # Por defecto lo mandamos a reportes
-                            
-                            # Guardamos en session_state para la extracción principal
-                            if 'df_extra' not in st.session_state:
-                                st.session_state.df_extra = pd.DataFrame()
-                                
-                            st.session_state.df_extra = pd.concat([st.session_state.df_extra, df_filtrado], ignore_index=True)
-                            
-                            st.success(f"¡{len(df_filtrado)} reportes procesados! Se incluirán al Generar el Boletín.")
-                            st.dataframe(df_filtrado, use_container_width=True)
-                        else:
-                            st.warning("Se extrajeron reportes, pero ninguno coincide con el mes y año seleccionados.")
-            else:
-                st.error("Pega algo de texto primero.")
-    st.markdown("---")
-    # ========================================================
 
     if st.button("📄 Generar Boletín Mensual", type="primary"):
         if not m_sel or not a_sel:
@@ -3317,3 +3254,127 @@ elif modo_app == "Categorías":
             else:
                 st.warning(
                     "No se encontraron documentos para las fechas seleccionadas.")
+
+elif modo_app == "Carga Manual":
+    st.title("🛠️ Centro de Carga Manual")
+    st.markdown("Pega el texto de las páginas que fallan. Previsualiza, valida y une todo en un solo documento.")
+    
+    # 1. INICIALIZAR MEMORIA (Donde guardaremos las tablas validadas)
+    if 'cargas_validadas' not in st.session_state:
+        st.session_state.cargas_validadas = {
+            "OCDE (Reportes)": pd.DataFrame(),
+            "OCDE (Pub. Institucionales)": pd.DataFrame(),
+            "OCDE (Investigación)": pd.DataFrame(),
+            "BoE (Discursos)": pd.DataFrame()
+        }
+
+    # 2. DASHBOARD DE ESTADO (Checklist Visual)
+    st.subheader("Estado de Carga")
+    cols_estado = st.columns(4)
+    claves_cajas = list(st.session_state.cargas_validadas.keys())
+    
+    for i, clave in enumerate(claves_cajas):
+        estado = "✅ Listo" if not st.session_state.cargas_validadas[clave].empty else "❌ Pendiente"
+        cols_estado[i].info(f"**{clave}**\n\n{estado}")
+
+    st.markdown("---")
+    
+    # Filtros Maestros para todo el módulo
+    c1, c2 = st.columns(2)
+    mes_manual = c1.selectbox("Mes objetivo a filtrar:", [1,2,3,4,5,6,7,8,9,10,11,12], index=datetime.datetime.now().month-1, format_func=lambda x: calendar.month_name[x].capitalize())
+    año_manual = c2.number_input("Año objetivo a filtrar:", min_value=2020, max_value=2030, value=datetime.datetime.now().year)
+
+    st.markdown("---")
+    st.subheader("Cajas de Extracción")
+
+    # Función auxiliar para crear cada caja repetitiva
+    def crear_caja_manual(titulo_caja, categoria_doc, organismo_nombre):
+        with st.expander(f"📥 Cargar: {titulo_caja}", expanded=True):
+            texto = st.text_area(f"Pega aquí el texto de {titulo_caja}:", height=150, key=f"txt_{titulo_caja}")
+            
+            col_btn1, col_btn2 = st.columns([1, 1])
+            
+            # Botón 1: Previsualizar
+            if col_btn1.button(f"🔍 Previsualizar {titulo_caja}", key=f"btn_prev_{titulo_caja}"):
+                if texto:
+                    with st.spinner("Procesando y buscando links (DOI)..."):
+                        # Usamos tu función procesadora ya existente
+                        df_bruto = procesar_texto_pegado(texto, organismo_nombre)
+                        if not df_bruto.empty:
+                            # Filtramos por el mes y año maestro
+                            df_filtrado = df_bruto[
+                                (df_bruto['Date'].dt.month == mes_manual) & 
+                                (df_bruto['Date'].dt.year == año_manual)
+                            ].copy()
+                            
+                            if not df_filtrado.empty:
+                                # Buscamos links solo para los filtrados (Por ahora usando DOI)
+                                for idx in df_filtrado.index:
+                                    t = df_filtrado.loc[idx, "Title"]
+                                    df_filtrado.loc[idx, "Link"] = buscar_link_inteligente(t, organismo_nombre)
+                                
+                                df_filtrado['Categoría'] = categoria_doc
+                                
+                                # Lo guardamos en una memoria TEMPORAL solo para esta vista
+                                st.session_state[f"temp_{titulo_caja}"] = df_filtrado
+                                
+                                st.success(f"Se encontraron {len(df_filtrado)} reportes.")
+                                st.dataframe(df_filtrado, use_container_width=True)
+                            else:
+                                st.warning("No hay coincidencias con el mes y año.")
+                else:
+                    st.error("Pega el texto primero.")
+            
+            # Botón 2: Agregar a Descarga
+            if col_btn2.button(f"➕ Agregar a Descarga Final", type="primary", key=f"btn_add_{titulo_caja}"):
+                if f"temp_{titulo_caja}" in st.session_state and not st.session_state[f"temp_{titulo_caja}"].empty:
+                    # Pasamos de la memoria temporal a la memoria validada
+                    st.session_state.cargas_validadas[titulo_caja] = st.session_state[f"temp_{titulo_caja}"]
+                    st.success(f"¡{titulo_caja} guardado en memoria! ✅")
+                    time.sleep(1)
+                    st.rerun() # Recarga la app para actualizar las palomitas verdes arriba
+                else:
+                    st.error("Primero debes Previsualizar y obtener resultados.")
+
+    # 3. CREAR LAS 4 CAJAS
+    crear_caja_manual("OCDE (Reportes)", "Reportes", "OCDE")
+    crear_caja_manual("OCDE (Pub. Institucionales)", "Publicaciones Institucionales", "OCDE")
+    crear_caja_manual("OCDE (Investigación)", "Investigación", "OCDE")
+    crear_caja_manual("BoE (Discursos)", "Discursos", "BoE (Inglaterra)")
+
+    # 4. BOTÓN DE DESCARGA MAESTRA
+    st.markdown("---")
+    st.subheader("Exportación Final")
+    
+    # Juntamos todas las tablas validadas que NO estén vacías
+    tablas_listas = [df for df in st.session_state.cargas_validadas.values() if not df.empty]
+    
+    if tablas_listas:
+        df_maestro = pd.concat(tablas_listas, ignore_index=True)
+        
+        # Calculamos cuántas de las 4 categorías se llenaron
+        num_cat = len(tablas_listas)
+        st.info(f"Tienes **{num_cat}/4** categorías listas, sumando un total de **{len(df_maestro)}** documentos para exportar.")
+        
+        # Preparamos el formato exacto que pide tu función generate_word
+        df_word_manual = df_maestro[['Categoría', 'Organismo', 'Title', 'Link']].copy()
+        df_word_manual = df_word_manual.rename(columns={"Categoría": "Tipo de Documento", "Title": "Nombre de Documento"})
+        
+        # Generar archivo
+        word_manual = generate_word(df_word_manual, title="Boletín - Carga Manual", subtitle=f"Mes: {mes_manual} | Año: {año_manual}")
+        
+        c_down, c_clear = st.columns(2)
+        with c_down:
+            # El botón ahora te dice exactamente qué estás bajando
+            st.download_button(
+                label=f"📄 Descargar Word ({num_cat}/4 Listas)", 
+                data=word_manual, 
+                file_name=f"Carga_Manual_{mes_manual}_{año_manual}.docx"
+            )
+        with c_clear:
+            if st.button("🗑️ Reiniciar todo el módulo"):
+                for clave in st.session_state.cargas_validadas.keys():
+                    st.session_state.cargas_validadas[clave] = pd.DataFrame()
+                st.rerun()
+    else:
+        st.warning("Aún no has agregado ninguna carga a la descarga final. Agrega al menos 1 para habilitar el botón de descarga.")
