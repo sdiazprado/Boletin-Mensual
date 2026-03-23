@@ -3255,6 +3255,8 @@ elif modo_app == "Categorías":
                 st.warning(
                     "No se encontraron documentos para las fechas seleccionadas.")
 
+        st.warning("Aún no has agregado ninguna carga a la descarga final. Agrega al menos 1 para habilitar el botón de descarga.")
+
 elif modo_app == "Carga Manual":
     st.title("🛠️ Centro de Carga Manual")
     st.markdown("Pega el texto de las páginas que fallan. Previsualiza, valida y une todo en un solo documento.")
@@ -3287,10 +3289,15 @@ elif modo_app == "Carga Manual":
     st.markdown("---")
     st.subheader("Cajas de Extracción")
 
-    # Función auxiliar para crear cada caja repetitiva
-    def crear_caja_manual(titulo_caja, categoria_doc, organismo_nombre):
+    # Función auxiliar para crear cada caja repetitiva (¡AHORA CON LINKS!)
+    def crear_caja_manual(titulo_caja, categoria_doc, organismo_nombre, url_fuente=None):
         with st.expander(f"📥 Cargar: {titulo_caja}", expanded=True):
-            texto = st.text_area(f"Pega aquí el texto de {titulo_caja}:", height=150, key=f"txt_{titulo_caja}")
+            
+            # Mostrar el link de manera destacada si existe
+            if url_fuente:
+                st.markdown(f"**[Link {titulo_caja}]({url_fuente})**")
+                
+            texto = st.text_area(f"Copia el texto de la página y pégalo aquí (Ctrl+A, Ctrl+C, Ctrl+V):", height=150, key=f"txt_{titulo_caja}")
             
             col_btn1, col_btn2 = st.columns([1, 1])
             
@@ -3298,24 +3305,20 @@ elif modo_app == "Carga Manual":
             if col_btn1.button(f"🔍 Previsualizar {titulo_caja}", key=f"btn_prev_{titulo_caja}"):
                 if texto:
                     with st.spinner("Procesando y buscando links (DOI)..."):
-                        # Usamos tu función procesadora ya existente
+                        # Usamos la función procesadora universal de OCDE por ahora
                         df_bruto = procesar_texto_pegado(texto, organismo_nombre)
                         if not df_bruto.empty:
-                            # Filtramos por el mes y año maestro
                             df_filtrado = df_bruto[
                                 (df_bruto['Date'].dt.month == mes_manual) & 
                                 (df_bruto['Date'].dt.year == año_manual)
                             ].copy()
                             
                             if not df_filtrado.empty:
-                                # Buscamos links solo para los filtrados (Por ahora usando DOI)
                                 for idx in df_filtrado.index:
                                     t = df_filtrado.loc[idx, "Title"]
                                     df_filtrado.loc[idx, "Link"] = buscar_link_inteligente(t, organismo_nombre)
                                 
                                 df_filtrado['Categoría'] = categoria_doc
-                                
-                                # Lo guardamos en una memoria TEMPORAL solo para esta vista
                                 st.session_state[f"temp_{titulo_caja}"] = df_filtrado
                                 
                                 st.success(f"Se encontraron {len(df_filtrado)} reportes.")
@@ -3328,44 +3331,43 @@ elif modo_app == "Carga Manual":
             # Botón 2: Agregar a Descarga
             if col_btn2.button(f"➕ Agregar a Descarga Final", type="primary", key=f"btn_add_{titulo_caja}"):
                 if f"temp_{titulo_caja}" in st.session_state and not st.session_state[f"temp_{titulo_caja}"].empty:
-                    # Pasamos de la memoria temporal a la memoria validada
                     st.session_state.cargas_validadas[titulo_caja] = st.session_state[f"temp_{titulo_caja}"]
                     st.success(f"¡{titulo_caja} guardado en memoria! ✅")
                     time.sleep(1)
-                    st.rerun() # Recarga la app para actualizar las palomitas verdes arriba
+                    st.rerun() 
                 else:
                     st.error("Primero debes Previsualizar y obtener resultados.")
 
-    # 3. CREAR LAS 4 CAJAS
-    crear_caja_manual("OCDE (Reportes)", "Reportes", "OCDE")
-    crear_caja_manual("OCDE (Pub. Institucionales)", "Publicaciones Institucionales", "OCDE")
-    crear_caja_manual("OCDE (Investigación)", "Investigación", "OCDE")
-    crear_caja_manual("BoE (Discursos)", "Discursos", "BoE (Inglaterra)")
+    # 3. CREAR LAS 4 CAJAS (INYECCIÓN DE LINKS)
+    link_ocde_rep = "https://www.oecd.org/en/search/publications.html?orderBy=mostRecent&page=0&facetTags=oecd-content-types%3Apublications%2Freports%2Coecd-languages%3Aen&minPublicationYear=2026&maxPublicationYear=2026"
+    link_ocde_pub = "https://www.oecd.org/en/search.html?orderBy=mostRecent&page=0&facetTags=oecd-policy-subissues%3Apsi114%2Coecd-languages%3Aen"
+    link_ocde_inv = "https://www.oecd.org/en/publications/reports.html?orderBy=mostRecent&page=0&facetTags=oecd-content-types%3Apublications%2Fworking-papers%2Coecd-languages%3Aen"
+    
+    crear_caja_manual("OCDE (Reportes)", "Reportes", "OCDE", link_ocde_rep)
+    crear_caja_manual("OCDE (Pub. Institucionales)", "Publicaciones Institucionales", "OCDE", link_ocde_pub)
+    crear_caja_manual("OCDE (Investigación)", "Investigación", "OCDE", link_ocde_inv)
+    
+    # Para el BoE lo dejamos en blanco (None) temporalmente hasta que tengamos el link
+    crear_caja_manual("BoE (Discursos)", "Discursos", "BoE (Inglaterra)", None)
 
     # 4. BOTÓN DE DESCARGA MAESTRA
     st.markdown("---")
     st.subheader("Exportación Final")
     
-    # Juntamos todas las tablas validadas que NO estén vacías
     tablas_listas = [df for df in st.session_state.cargas_validadas.values() if not df.empty]
     
     if tablas_listas:
         df_maestro = pd.concat(tablas_listas, ignore_index=True)
-        
-        # Calculamos cuántas de las 4 categorías se llenaron
         num_cat = len(tablas_listas)
         st.info(f"Tienes **{num_cat}/4** categorías listas, sumando un total de **{len(df_maestro)}** documentos para exportar.")
         
-        # Preparamos el formato exacto que pide tu función generate_word
         df_word_manual = df_maestro[['Categoría', 'Organismo', 'Title', 'Link']].copy()
         df_word_manual = df_word_manual.rename(columns={"Categoría": "Tipo de Documento", "Title": "Nombre de Documento"})
         
-        # Generar archivo
         word_manual = generate_word(df_word_manual, title="Boletín - Carga Manual", subtitle=f"Mes: {mes_manual} | Año: {año_manual}")
         
         c_down, c_clear = st.columns(2)
         with c_down:
-            # El botón ahora te dice exactamente qué estás bajando
             st.download_button(
                 label=f"📄 Descargar Word ({num_cat}/4 Listas)", 
                 data=word_manual, 
