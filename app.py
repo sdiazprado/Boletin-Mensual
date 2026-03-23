@@ -1939,7 +1939,72 @@ def load_investigacion_bm(start_date_str, end_date_str):
         df = df.sort_values("Date", ascending=False)
     return df
 # --- SECCIÓN: DISCURSOS ---
+@st.cache_data(show_spinner=False)
+def load_discursos_boe(start_date_str, end_date_str):
+    """Extractor Automático BoE - Vía RSS"""
+    import requests
+    from bs4 import BeautifulSoup
+    import pandas as pd
+    import datetime
+    import re
+    from dateutil import parser
 
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+    except:
+        start_date = datetime.datetime(2025, 1, 1)
+        end_date = datetime.datetime.now()
+
+    url = "https://www.bankofengland.co.uk/rss/speeches"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    rows = []
+
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.content, "xml")
+            items = soup.find_all("item")
+
+            for item in items:
+                titulo_raw = item.find("title").text if item.find("title") else ""
+                link = item.find("link").text if item.find("link") else ""
+                fecha_raw = item.find("pubDate").text if item.find("pubDate") else ""
+
+                if not titulo_raw or not link or not fecha_raw: continue
+
+                try:
+                    parsed_date = parser.parse(fecha_raw)
+                    if parsed_date.tzinfo is not None:
+                        parsed_date = parsed_date.replace(tzinfo=None)
+                except:
+                    continue
+
+                if start_date <= parsed_date <= end_date:
+                    autor = ""
+                    titulo_limpio = titulo_raw
+                    match_autor = re.search(r'(?i)\s*[\-–—]\s*speech\s+by\s+(.*)$', titulo_raw)
+                    if match_autor:
+                        autor = clean_author_name(match_autor.group(1).strip())
+                        titulo_limpio = re.sub(r'(?i)\s*[\-–—]\s*speech\s+by\s+.*$', '', titulo_raw).strip()
+
+                    titulo_final = f"{autor}: {titulo_limpio}" if autor else titulo_limpio
+
+                    if not any(r['Link'] == link for r in rows):
+                        rows.append({
+                            "Date": parsed_date,
+                            "Title": titulo_final,
+                            "Link": link,
+                            "Organismo": "BoE (Inglaterra)"
+                        })
+    except Exception as e:
+        pass
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values(by="Date", ascending=False)
+    return df
 
 @st.cache_data(show_spinner=False)
 def load_discursos_fmi(start_date_str, end_date_str):
@@ -2856,8 +2921,7 @@ meses_dict = {
 }
 
 # --- LISTAS DINÁMICAS DE ORGANISMOS ---
-orgs_discursos = ["BBk (Alemania)", "BdE (España)", "BdF (Francia)", "BM", "BoC (Canadá)",
-                  "BoJ (Japón)", "BPI", "CEF", "ECB (Europa)", "Fed (Estados Unidos)", "FMI", "PBoC (China)"]
+orgs_discursos = ["BBk (Alemania)", "BdE (España)", "BdF (Francia)", "BM", "BoC (Canadá)", "BoE (Inglaterra)", "BoJ (Japón)", "BPI", "CEF", "ECB (Europa)", "Fed (Estados Unidos)", "FMI", "PBoC (China)"]
 orgs_reportes = ["BID", "BM", "BPI", "CEF", "FEM", "OCDE"]
 orgs_pub_inst = ["BM", "BPI", "CEF", "CEMLA", "FMI", "G20", "OCDE", "OEI"]
 orgs_investigacion = ["BID", "BM", "BPI", "CEMLA", "FMI", "OCDE"]
@@ -2913,6 +2977,9 @@ if modo_app == "Boletín":
                         df = load_data_boc(sd, ed)
                     elif org == "BoJ (Japón)":
                         df = load_data_boj(sd, ed)
+                    elif org == "BoJ (Japón)": df = load_data_boj(sd, ed)
+                    elif org == "BoE (Inglaterra)": df = load_discursos_boe(sd, ed)
+                    elif org == "CEF": df = load_data_cef(sd, ed)
                     elif org == "CEF":
                         df = load_data_cef(sd, ed)
                     elif org == "PBoC (China)":
@@ -3189,6 +3256,7 @@ elif modo_app == "Categorías":
                             df = load_data_boc(sd, ed)
                         elif o == "BoJ (Japón)":
                             df = load_data_boj(sd, ed)
+                        elif o == "BoE (Inglaterra)": df = load_discursos_boe(sd, ed)
                         elif o == "CEF":
                             df = load_data_cef(sd, ed)
                         elif o == "FMI":
@@ -3335,24 +3403,19 @@ elif modo_app == "Categorías":
                 st.warning(
                     "No se encontraron documentos para las fechas seleccionadas.")
 
-        st.warning("Aún no has agregado ninguna carga a la descarga final. Agrega al menos 1 para habilitar el botón de descarga.")
-
 elif modo_app == "Carga Manual":
     st.title("🛠️ Centro de Carga Manual")
     st.markdown("Pega el texto de las páginas que fallan. Previsualiza, valida y une todo en un solo documento.")
     
-    # 1. INICIALIZAR MEMORIA (Donde guardaremos las tablas validadas)
     if 'cargas_validadas' not in st.session_state:
         st.session_state.cargas_validadas = {
             "OCDE (Reportes)": pd.DataFrame(),
             "OCDE (Pub. Institucionales)": pd.DataFrame(),
-            "OCDE (Investigación)": pd.DataFrame(),
-            "BoE (Discursos)": pd.DataFrame()
+            "OCDE (Investigación)": pd.DataFrame()
         }
 
-    # 2. DASHBOARD DE ESTADO (Checklist Visual)
     st.subheader("Estado de Carga")
-    cols_estado = st.columns(4)
+    cols_estado = st.columns(3)
     claves_cajas = list(st.session_state.cargas_validadas.keys())
     
     for i, clave in enumerate(claves_cajas):
@@ -3361,7 +3424,6 @@ elif modo_app == "Carga Manual":
 
     st.markdown("---")
     
-    # Filtros Maestros para todo el módulo
     c1, c2 = st.columns(2)
     mes_manual = c1.selectbox("Mes objetivo a filtrar:", [1,2,3,4,5,6,7,8,9,10,11,12], index=datetime.datetime.now().month-1, format_func=lambda x: calendar.month_name[x].capitalize())
     año_manual = c2.number_input("Año objetivo a filtrar:", min_value=2020, max_value=2030, value=datetime.datetime.now().year)
@@ -3369,12 +3431,11 @@ elif modo_app == "Carga Manual":
     st.markdown("---")
     st.subheader("Cajas de Extracción")
 
-    # Función auxiliar para crear cada caja repetitiva (AHORA CON SWITCH BOE)
     def crear_caja_manual(titulo_caja, categoria_doc, organismo_nombre, url_fuente=None):
         with st.expander(f"📥 Cargar: {titulo_caja}", expanded=True):
             
             if url_fuente:
-                st.markdown(f" **[Link {titulo_caja}]({url_fuente})**")
+                st.markdown(f"👉 **[Haz clic aquí para abrir la página oficial de {titulo_caja}]({url_fuente})**")
                 
             texto = st.text_area(f"Copia el texto de la página y pégalo aquí (Ctrl+A, Ctrl+C, Ctrl+V):", height=150, key=f"txt_{titulo_caja}")
             
@@ -3383,12 +3444,7 @@ elif modo_app == "Carga Manual":
             if col_btn1.button(f"🔍 Previsualizar {titulo_caja}", key=f"btn_prev_{titulo_caja}"):
                 if texto:
                     with st.spinner("Procesando y buscando links..."):
-                        
-                        # --- SWITCH DE LÓGICA DE EXTRACCIÓN ---
-                        if organismo_nombre == "BoE (Inglaterra)":
-                            df_bruto = procesar_texto_pegado_boe(texto)
-                        else:
-                            df_bruto = procesar_texto_pegado(texto, organismo_nombre)
+                        df_bruto = procesar_texto_pegado(texto, organismo_nombre)
                             
                         if not df_bruto.empty:
                             df_filtrado = df_bruto[
@@ -3399,12 +3455,7 @@ elif modo_app == "Carga Manual":
                             if not df_filtrado.empty:
                                 for idx in df_filtrado.index:
                                     t = df_filtrado.loc[idx, "Title"]
-                                    
-                                    # --- SWITCH DE LÓGICA DE LINKS ---
-                                    if organismo_nombre == "BoE (Inglaterra)":
-                                        df_filtrado.loc[idx, "Link"] = buscar_link_boe(t)
-                                    else:
-                                        df_filtrado.loc[idx, "Link"] = buscar_link_inteligente(t, organismo_nombre)
+                                    df_filtrado.loc[idx, "Link"] = buscar_link_inteligente(t, organismo_nombre)
                                 
                                 df_filtrado['Categoría'] = categoria_doc
                                 st.session_state[f"temp_{titulo_caja}"] = df_filtrado
@@ -3425,17 +3476,14 @@ elif modo_app == "Carga Manual":
                 else:
                     st.error("Primero debes Previsualizar y obtener resultados.")
 
-    # 3. CREAR LAS 4 CAJAS (CON TODOS LOS LINKS OFICIALES)
     link_ocde_rep = "https://www.oecd.org/en/search/publications.html?orderBy=mostRecent&page=0&facetTags=oecd-content-types%3Apublications%2Freports%2Coecd-languages%3Aen&minPublicationYear=2026&maxPublicationYear=2026"
     link_ocde_pub = "https://www.oecd.org/en/search.html?orderBy=mostRecent&page=0&facetTags=oecd-policy-subissues%3Apsi114%2Coecd-languages%3Aen"
     link_ocde_inv = "https://www.oecd.org/en/publications/reports.html?orderBy=mostRecent&page=0&facetTags=oecd-content-types%3Apublications%2Fworking-papers%2Coecd-languages%3Aen"
-    link_boe_disc = "https://www.bankofengland.co.uk/news/speeches"
     
     crear_caja_manual("OCDE (Reportes)", "Reportes", "OCDE", link_ocde_rep)
     crear_caja_manual("OCDE (Pub. Institucionales)", "Publicaciones Institucionales", "OCDE", link_ocde_pub)
     crear_caja_manual("OCDE (Investigación)", "Investigación", "OCDE", link_ocde_inv)
-    crear_caja_manual("BoE (Discursos)", "Discursos", "BoE (Inglaterra)", link_boe_disc)
-    # 4. BOTÓN DE DESCARGA MAESTRA
+
     st.markdown("---")
     st.subheader("Exportación Final")
     
@@ -3444,7 +3492,7 @@ elif modo_app == "Carga Manual":
     if tablas_listas:
         df_maestro = pd.concat(tablas_listas, ignore_index=True)
         num_cat = len(tablas_listas)
-        st.info(f"Tienes **{num_cat}/4** categorías listas, sumando un total de **{len(df_maestro)}** documentos para exportar.")
+        st.info(f"Tienes **{num_cat}/3** categorías listas, sumando un total de **{len(df_maestro)}** documentos para exportar.")
         
         df_word_manual = df_maestro[['Categoría', 'Organismo', 'Title', 'Link']].copy()
         df_word_manual = df_word_manual.rename(columns={"Categoría": "Tipo de Documento", "Title": "Nombre de Documento"})
@@ -3454,7 +3502,7 @@ elif modo_app == "Carga Manual":
         c_down, c_clear = st.columns(2)
         with c_down:
             st.download_button(
-                label=f"📄 Descargar Word ({num_cat}/4 Listas)", 
+                label=f"📄 Descargar Word ({num_cat}/3 Listas)", 
                 data=word_manual, 
                 file_name=f"Carga_Manual_{mes_manual}_{año_manual}.docx"
             )
