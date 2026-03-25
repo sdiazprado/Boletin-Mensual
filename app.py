@@ -1361,6 +1361,120 @@ def load_country_reports_elibrary(start_date_str, end_date_str):
         df = df.sort_values("Date", ascending=False)
     return df
 
+## FMI - Publiccaciones Institucionales - INICIO
+
+## FMI - F&D Magazine (inicio)
+@st.cache_data(show_spinner=False)
+def load_pub_inst_fandd(start_date_str, end_date_str):
+    """Extrae ediciones completas de la revista F&D Magazine del FMI"""
+    import requests
+    import json
+    import re
+    import datetime
+    import pandas as pd
+
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 FMI F&D: {start_date.date()} a {end_date.date()}")
+    except:
+        start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+        print(f"⚠️ Error en fechas, usando rango por defecto")
+
+    url = "https://www.imf.org/en/publications/fandd/issues"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+
+    rows = []
+
+    try:
+        print(f"📡 Solicitando página: {url}")
+        res = requests.get(url, headers=headers, timeout=15)
+        
+        if res.status_code != 200:
+            print(f"❌ Error al acceder a la página: {res.status_code}")
+            return pd.DataFrame()
+
+        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', res.text, re.DOTALL)
+        if not match:
+            print("❌ No se encontró el script __NEXT_DATA__")
+            return pd.DataFrame()
+
+        data = json.loads(match.group(1))
+        
+        # Navegación por componentProps
+        try:
+            component_props = data['props']['pageProps']['componentProps']
+            issue_list = None
+            for comp_id, comp_data in component_props.items():
+                if 'issueList' in comp_data:
+                    issue_list = comp_data['issueList']
+                    print(f"✅ Encontrado issueList en componente: {comp_id}")
+                    break
+            
+            if not issue_list:
+                print("❌ No se encontró issueList en componentProps")
+                return pd.DataFrame()
+            
+            results = issue_list.get('results', [])
+            print(f"✅ Total de números encontrados: {len(results)}")
+            
+        except (KeyError, TypeError) as e:
+            print(f"❌ Error navegando: {e}")
+            return pd.DataFrame()
+
+        meses_map = {
+            'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+            'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+        }
+
+        for issue in results:
+            issue_title = issue.get('issueTitle', {}).get('jsonValue', {}).get('value', '').strip()
+            issue_label = issue.get('issueLabel', {}).get('jsonValue', {}).get('value', '').strip()
+            issue_url = issue.get('url', {}).get('url', '')
+            
+            fecha_texto = issue_label if issue_label else issue_title
+            
+            match_date = re.search(r'([A-Za-z]+)\s+(\d{4})', fecha_texto, re.IGNORECASE)
+            if not match_date:
+                print(f"   ⚠️ No se pudo parsear fecha de: '{fecha_texto}'")
+                continue
+            
+            mes_str = match_date.group(1).lower()
+            año = int(match_date.group(2))
+            mes_num = meses_map.get(mes_str, 1)
+            issue_date = datetime.datetime(año, mes_num, 19)
+            
+            if issue_date < start_date or issue_date > end_date:
+                continue
+            
+            title_clean = re.sub(r'\s+', ' ', issue_title).strip()
+            if not title_clean:
+                title_clean = fecha_texto
+            
+            rows.append({
+                "Date": issue_date,
+                "Title": title_clean,
+                "Link": issue_url,
+                "Organismo": "F&D Magazine"
+            })
+        
+    except Exception as e:
+        print(f"❌ Error general: {e}")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.drop_duplicates(subset=['Link'])
+        df = df.sort_values("Date", ascending=False)
+        print(f"\n✅ TOTAL FMI F&D: {len(df)} ediciones")
+
+    return df
+
+## FMI - 
 
 @st.cache_data(show_spinner=False)
 def load_pub_inst_fmi(start_date_str, end_date_str):
@@ -3005,7 +3119,7 @@ meses_dict = {
 # --- LISTAS DINÁMICAS DE ORGANISMOS ---
 orgs_discursos = ["BBk (Alemania)", "BdE (España)", "BdF (Francia)", "BM", "BoC (Canadá)", "BoE (Inglaterra)", "BoJ (Japón)", "BPI", "CEF", "ECB (Europa)", "Fed (Estados Unidos)", "FMI", "PBoC (China)"]
 orgs_reportes = ["BID", "BM", "BPI", "CEF", "FEM", "OCDE"]
-orgs_pub_inst = ["BM", "BPI", "CEF", "CEMLA", "FMI", "G20", "OCDE", "OEI"]
+orgs_pub_inst = ["BM", "BPI", "CEF", "CEMLA", "FMI", "F&D","G20", "OCDE", "OEI"]
 orgs_investigacion = ["BID", "BM", "BPI", "CEMLA", "FMI", "OCDE"]
 
 if modo_app == "Boletín":
@@ -3130,8 +3244,14 @@ if modo_app == "Boletín":
                         df = load_pub_inst_bpi(sd, ed)
                     elif org == "CEF":
                         df = load_pub_inst_cef(sd, ed)
+                    elif org == "FMI":  
+                        df = load_pub_inst_fmi(sd, ed)
+                    elif org == "F&D":  
+                        df = load_pub_inst_fandd(sd, ed)
                     elif org == "BM":
                         df = load_pub_inst_bm(sd, ed)
+                    elif org == "CEMLA":  
+                        df = load_pub_inst_cemla(sd, ed)
                     elif org == "OEI": 
                         df = load_pub_inst_oei(sd, ed)
                     elif org == "FMI":
