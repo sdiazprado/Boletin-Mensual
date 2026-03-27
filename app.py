@@ -1014,6 +1014,363 @@ def load_pub_inst_oei(start_date_str, end_date_str):
         if driver: driver.quit()
 
     return pd.DataFrame(rows).sort_values("Date", ascending=False)
+
+# ========== FUNCIÓN PARA CEMLA (PUBLICACIONES INSTITUCIONALES) ==========
+@st.cache_data(show_spinner=False)
+def load_pub_inst_cemla(start_date_str, end_date_str):
+    """Extractor para Boletín CEMLA - Versión optimizada para la estructura de Mailchimp"""
+    import requests
+    from bs4 import BeautifulSoup
+    import datetime
+    import re
+    import pandas as pd
+    import time
+
+    url = "https://www.cemla.org/comunicados.html"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+
+    print("="*50)
+    print("🔍 Iniciando extracción de CEMLA con novedades individuales...")
+    print(f"📅 Rango solicitado: {start_date_str} a {end_date_str}")
+    print("="*50)
+
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"✅ Fechas parseadas: {start_date.date()} a {end_date.date()}")
+    except Exception as e:
+        print(f"⚠️ Error parseando fechas: {e}")
+        start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now() + datetime.timedelta(days=365)
+        print(f"📅 Usando rango por defecto: {start_date.date()} a {end_date.date()}")
+
+    rows = []
+
+    palabras_excluir = [
+        'convocatoria', 'premio', 'curso', 'taller', 'seminario',
+        'evento', 'webinar', 'congreso', 'beca', 'inscripción',
+        'registro', 'participación', 'invitación', 'calendario',
+        'programa de actividades', 'agenda', 'convocan', 'postulación',
+        'reunión de gobernadores', 'reunión de responsables', 'encuesta',
+        'award', 'prize', 'conference', 'workshop', 'registration',
+        'call for papers', 'agenda', 'calendar', 'program', 'invitation',
+        'survey', 'meeting', 'governors', 'responsables'
+    ]
+    urls_excluir = [
+        'calendario', 'premiodebancacentral', 'convocatoria',
+        'award', 'prize', 'course', 'workshop', 'event',
+        'reunion', 'meeting', 'programa-actividades'
+    ]
+
+    meses_map = {
+        'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4,
+        'mayo': 5, 'junio': 6, 'julio': 7, 'agosto': 8,
+        'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12,
+    }
+
+    try:
+        print(f"📡 Solicitando lista de boletines desde {url}...")
+        res = requests.get(url, headers=headers, timeout=15)
+        print(f"   Status code: {res.status_code}")
+        
+        if res.status_code != 200:
+            print(f"   ❌ Error al acceder a la página")
+            return pd.DataFrame()
+
+        soup = BeautifulSoup(res.text, 'html.parser')
+        print(f"✅ Página cargada, {len(soup.text)} caracteres")
+
+        boletines = []
+        for element in soup.find_all(['p', 'div', 'h3', 'h4', 'li']):
+            text = element.get_text(strip=True)
+            match = re.match(r'^([A-Za-z]+)\s+(\d{4})', text)
+            if not match:
+                continue
+
+            mes_str, year_str = match.groups()
+            mes_num = meses_map.get(mes_str.lower())
+            if not mes_num:
+                continue
+
+            try:
+                fecha = datetime.datetime(int(year_str), mes_num, 1)
+            except:
+                continue
+
+            a_tag = element.find('a', href=True, string=re.compile(r'Ver más', re.I))
+            if not a_tag:
+                next_elem = element.find_next_sibling()
+                if next_elem:
+                    a_tag = next_elem.find('a', href=True, string=re.compile(r'Ver más', re.I))
+            
+            if a_tag:
+                href = a_tag.get('href')
+                if href:
+                    if href.startswith('/'):
+                        link = f"https://www.cemla.org{href}"
+                    elif href.startswith('http'):
+                        link = href
+                    else:
+                        link = f"https://www.cemla.org/{href}"
+                    
+                    boletines.append({
+                        'fecha': fecha,
+                        'titulo': text,
+                        'link': link
+                    })
+
+        print(f"✅ Total boletines principales: {len(boletines)}")
+
+        if not boletines:
+            return pd.DataFrame()
+
+        for boletin in boletines:
+            if boletin['fecha'] < start_date or boletin['fecha'] > end_date:
+                continue
+
+            print(f"\n🔍 Procesando boletín {boletin['fecha'].strftime('%Y-%m')}: {boletin['link']}")
+            
+            try:
+                time.sleep(1)
+                
+                res_boletin = requests.get(boletin['link'], headers=headers, timeout=15)
+                if res_boletin.status_code != 200:
+                    continue
+
+                soup_boletin = BeautifulSoup(res_boletin.text, 'html.parser')
+                
+                bloques = soup_boletin.find_all('div', class_=lambda c: c and 'ipost' in c.split())
+                
+                if not bloques:
+                    bloques = soup_boletin.find_all('div', class_=lambda c: c and ('entry' in c or 'post' in c))
+                
+                for bloque in bloques:
+                    try:
+                        title_elem = bloque.find('h3')
+                        if not title_elem:
+                            title_elem = bloque.find(['h1', 'h2', 'h4'])
+                        
+                        if not title_elem:
+                            continue
+                        
+                        titulo = title_elem.get_text(strip=True)
+                        if not titulo or len(titulo) < 10:
+                            continue
+                        
+                        link_final = None
+                        enlaces = bloque.find_all('a', href=True)
+                        
+                        for a in enlaces:
+                            href = a.get('href', '').strip()
+                            if not href:
+                                continue
+                            
+                            if any(x in href.lower() for x in ['twitter', 'facebook', 'mailchi.mp', 'unsubscribe', 'share', 'forward']):
+                                continue
+                            
+                            if href.startswith('/'):
+                                href_full = f"https://www.cemla.org{href}"
+                            elif href.startswith('http'):
+                                href_full = href
+                            else:
+                                href_full = f"https://www.cemla.org/{href}"
+                            
+                            if href_full.endswith('.pdf') or not re.search(r'leer\s*más', a.get_text(strip=True), re.I):
+                                link_final = href_full
+                                break
+                            else:
+                                if not link_final:
+                                    link_final = href_full
+                        
+                        if not link_final:
+                            continue
+                        
+                        titulo = re.sub(r'\s+', ' ', titulo).strip()
+                        if len(titulo) > 150:
+                            titulo = titulo[:150] + "..."
+                        
+                        texto_lower = titulo.lower()
+                        url_lower = link_final.lower()
+                        
+                        es_excluido_titulo = any(p in texto_lower for p in palabras_excluir)
+                        es_excluido_url = any(p in url_lower for p in urls_excluir)
+                        
+                        if es_excluido_titulo or es_excluido_url:
+                            continue
+                        
+                        rows.append({
+                            'Date': boletin['fecha'],
+                            'Title': titulo,
+                            'Link': link_final,
+                            'Organismo': "CEMLA"
+                        })
+                        print(f"  ✅ {titulo[:60]}...")
+                        
+                    except Exception as e:
+                        continue
+                
+            except Exception as e:
+                continue
+
+    except Exception as e:
+        print(f"❌ Error general: {e}")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.drop_duplicates(subset=['Date', 'Link'], keep='first')
+        
+        enlaces_a_excluir = [
+            'twitter.com/share',
+            'mailchi.mp/cemla.org/boletin',
+            'e=UNIQID'
+        ]
+        for excluir in enlaces_a_excluir:
+            df = df[~df['Link'].str.contains(excluir, na=False)]
+        
+        df = df.sort_values("Date", ascending=False)
+
+    return df
+
+
+# -- G20 --
+@st.cache_data(show_spinner=False)
+def load_pub_inst_g20(start_date_str, end_date_str):
+    """Extrae documentos del G20 desde la página de News and Media"""
+    import requests
+    from bs4 import BeautifulSoup
+    import datetime
+    import re
+    import pandas as pd
+
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 G20: {start_date.date()} a {end_date.date()}")
+    except:
+        start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+        print(f"⚠️ Error en fechas, usando rango por defecto")
+
+    url = "https://g20.org/media/"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    # Palabras clave que queremos incluir
+    keywords_incluir = [
+        'chair summary', 'declarations', 'g-20 note', 'presidency note',
+        'chair\'s summary', 'chair summary', 'g20 note', 'presidency note'
+    ]
+    
+    # Palabras clave para excluir
+    keywords_excluir = [
+        'agriculture', 'cultura', 'cultural', 'food security', 
+        'farming', 'rural', 'agri'
+    ]
+    
+    rows = []
+
+    try:
+        print(f"📡 Solicitando página: {url}")
+        res = requests.get(url, headers=headers, timeout=15)
+        
+        if res.status_code != 200:
+            print(f"❌ Error al acceder a la página: {res.status_code}")
+            return pd.DataFrame()
+
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # Buscar la sección de Press Releases
+        press_section = None
+        for section in soup.find_all('section', class_='paragraphsection'):
+            toptitle = section.find('h2', class_='toptitle')
+            if toptitle and 'Press Releases' in toptitle.get_text():
+                press_section = section
+                break
+        
+        if not press_section:
+            print("⚠️ No se encontró la sección de Press Releases")
+            return pd.DataFrame()
+        
+        # Buscar todos los artículos (h2 seguido de p con fecha)
+        articles = press_section.find_all(['h2', 'p'])
+        
+        i = 0
+        while i < len(articles) - 1:
+            if articles[i].name == 'h2':
+                h2 = articles[i]
+                a_tag = h2.find('a')
+                
+                if a_tag and a_tag.get('href'):
+                    titulo = a_tag.get_text(strip=True)
+                    link = a_tag.get('href')
+                    
+                    if not titulo:
+                        i += 1
+                        continue
+                    
+                    if i + 1 < len(articles) and articles[i + 1].name == 'p':
+                        p_text = articles[i + 1].get_text(strip=True)
+                        
+                        match = re.search(r'([A-Za-z]+ \d{1,2},? \d{4})', p_text)
+                        if match:
+                            fecha_str = match.group(1)
+                            try:
+                                fecha_str = fecha_str.replace(',', '')
+                                parsed_date = datetime.datetime.strptime(fecha_str, '%B %d %Y')
+                            except:
+                                try:
+                                    parsed_date = datetime.datetime.strptime(fecha_str, '%b %d %Y')
+                                except:
+                                    parsed_date = None
+                            
+                            if parsed_date:
+                                if parsed_date < start_date or parsed_date > end_date:
+                                    i += 2
+                                    continue
+                                
+                                titulo_lower = titulo.lower()
+                                incluir = any(kw in titulo_lower for kw in keywords_incluir)
+                                excluir = any(kw in titulo_lower for kw in keywords_excluir)
+                                
+                                if excluir or not incluir:
+                                    i += 2
+                                    continue
+                                
+                                if link.startswith('/'):
+                                    link = f"https://g20.org{link}"
+                                
+                                rows.append({
+                                    "Date": parsed_date,
+                                    "Title": titulo,
+                                    "Link": link,
+                                    "Organismo": "G20"
+                                })
+                                print(f"   ✅ Agregado: {titulo[:60]}... ({parsed_date.date()})")
+                    else:
+                        print(f"   ⚠️ No hay párrafo después del h2")
+                else:
+                    print(f"   ⚠️ h2 sin enlace válido")
+            
+            i += 1
+            
+    except Exception as e:
+        print(f"❌ Error general: {e}")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.drop_duplicates(subset=['Link'])
+        df = df.sort_values("Date", ascending=False)
+        print(f"\n✅ TOTAL G20: {len(df)} documentos")
+    else:
+        print("⚠️ No se encontraron documentos del G20")
+
+    return df
+
+# -- CEF -- #
+
 @st.cache_data(show_spinner=False)
 def load_pub_inst_cef(start_date_str, end_date_str):
     url = "https://www.fsb.org/publications/key-regular-publications/"
@@ -3536,8 +3893,7 @@ if modo_app == "Boletín":
                             sd, ed)  # <-- LA NUEVA API
 
                         # Unión
-                        dfs_a_unir = [d for d in [
-                            df_flagships, df_prs, df_crs] if not d.empty]
+                        dfs_a_unir = [d for d in [df_flagships, df_prs, df_crs] if not d.empty]
                         if dfs_a_unir:
                             df = pd.concat(dfs_a_unir, ignore_index=True)
                             df = df.sort_values("Date", ascending=False)
