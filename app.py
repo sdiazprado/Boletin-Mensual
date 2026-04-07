@@ -2829,9 +2829,10 @@ def load_investigacion_bm(start_date_str, end_date_str):
         df = df.sort_values("Date", ascending=False)
     return df
 # --- SECCIÓN: DISCURSOS ---
+## -- Banco de Inglaterra -- Bank of England (BoE)
 @st.cache_data(show_spinner=False)
 def load_discursos_boe(start_date_str, end_date_str):
-    """Extractor Automático BoE - Vía RSS"""
+    """Extractor Automático BoE - Vía RSS con formato consistente 'Autor: Título'"""
     import requests
     from bs4 import BeautifulSoup
     import pandas as pd
@@ -2850,6 +2851,42 @@ def load_discursos_boe(start_date_str, end_date_str):
     headers = {'User-Agent': 'Mozilla/5.0'}
     rows = []
 
+    def extract_author_from_title(title):
+        """Extrae el nombre del autor del título en varios formatos"""
+        autor = ""
+        titulo_limpio = title
+        
+        # Patrón 1: "Título − speech by Autor" (con guión largo o corto)
+        match = re.search(r'(?i)\s*[\-–—]\s*speech\s+by\s+(.+?)$', title)
+        if match:
+            autor = clean_author_name(match.group(1).strip())
+            # Eliminar TODO desde el guión hasta el final
+            titulo_limpio = re.sub(r'(?i)\s*[\-–—]\s*speech\s+by\s+.*$', '', title).strip()
+            return autor, titulo_limpio
+        
+        # Patrón 2: "Speech by Autor: Título" o "Speech by Autor - Título"
+        match = re.search(r'(?i)^speech\s+by\s+([^:—-]+)[:—-]\s*(.+)$', title)
+        if match:
+            autor = clean_author_name(match.group(1).strip())
+            titulo_limpio = match.group(2).strip()
+            return autor, titulo_limpio
+        
+        # Patrón 3: "Autor: Título" (ya está bien formateado)
+        match = re.search(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*:\s*(.+)$', title)
+        if match:
+            autor = clean_author_name(match.group(1))
+            titulo_limpio = match.group(2)
+            return autor, titulo_limpio
+        
+        # Patrón 4: "Título by Autor" (sin "speech")
+        match = re.search(r'(?i)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)$', title)
+        if match:
+            autor = clean_author_name(match.group(1))
+            titulo_limpio = re.sub(r'(?i)\s+by\s+.*$', '', title).strip()
+            return autor, titulo_limpio
+        
+        return None, title
+
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
@@ -2861,7 +2898,8 @@ def load_discursos_boe(start_date_str, end_date_str):
                 link = item.find("link").text if item.find("link") else ""
                 fecha_raw = item.find("pubDate").text if item.find("pubDate") else ""
 
-                if not titulo_raw or not link or not fecha_raw: continue
+                if not titulo_raw or not link or not fecha_raw:
+                    continue
 
                 try:
                     parsed_date = parser.parse(fecha_raw)
@@ -2871,15 +2909,27 @@ def load_discursos_boe(start_date_str, end_date_str):
                     continue
 
                 if start_date <= parsed_date <= end_date:
-                    autor = ""
-                    titulo_limpio = titulo_raw
-                    match_autor = re.search(r'(?i)\s*[\-–—]\s*speech\s+by\s+(.*)$', titulo_raw)
-                    if match_autor:
-                        autor = clean_author_name(match_autor.group(1).strip())
-                        titulo_limpio = re.sub(r'(?i)\s*[\-–—]\s*speech\s+by\s+.*$', '', titulo_raw).strip()
-
-                    titulo_final = f"{autor}: {titulo_limpio}" if autor else titulo_limpio
-
+                    # Extraer autor y título limpio
+                    autor, titulo_limpio = extract_author_from_title(titulo_raw)
+                    
+                    # LIMPIEZA DIRECTA: eliminar específicamente " − speech" o " −" al final
+                    # Primero, eliminar " − speech" (con el guión especial)
+                    titulo_limpio = titulo_limpio.replace(' − speech', '').replace(' - speech', '').replace('— speech', '')
+                    # Luego, eliminar " −" solitario al final
+                    titulo_limpio = titulo_limpio.replace(' −', '').replace(' -', '').replace('—', '')
+                    # Eliminar espacios sobrantes al final
+                    titulo_limpio = titulo_limpio.rstrip()
+                    
+                    # Construir título final en formato "Autor: Título"
+                    if autor:
+                        titulo_final = f"{autor}: {titulo_limpio}"
+                    else:
+                        titulo_final = titulo_limpio
+                    
+                    # Limpieza final de espacios múltiples
+                    titulo_final = re.sub(r'\s+', ' ', titulo_final).strip()
+                    titulo_final = titulo_final.strip('"').strip("'").strip()
+                    
                     if not any(r['Link'] == link for r in rows):
                         rows.append({
                             "Date": parsed_date,
@@ -2888,7 +2938,7 @@ def load_discursos_boe(start_date_str, end_date_str):
                             "Organismo": "BoE (Inglaterra)"
                         })
     except Exception as e:
-        pass
+        print(f"Error en load_discursos_boe: {e}")
 
     df = pd.DataFrame(rows)
     if not df.empty:
