@@ -3730,14 +3730,45 @@ def load_data_boc(start_date_str, end_date_str):
     return df
 
 
+## Conversor de Nombre (Nombre, Apellido) para Autores del Banco de Japón  
+def convertir_nombre_japones(nombre):
+    """
+    Convierte nombre japonés (apellido primero) a formato occidental.
+    
+    Ejemplos:
+    - "UEDA Kazuo" -> "Kazuo UEDA"
+    - "UEDA Kazuo San" -> "Kazuo San UEDA"
+    - "KURODA Haruhiko" -> "Haruhiko KURODA"
+    - "AMAMIYA Masayoshi" -> "Masayoshi AMAMIYA"
+    """
+    if not nombre:
+        return nombre
+    
+    partes = nombre.split()
+    if len(partes) < 2:
+        return nombre
+    
+    # La primera palabra es el apellido, el resto es el nombre
+    apellido = partes[0]
+    nombre_pila = " ".join(partes[1:])
+    
+    # Formato occidental: "Nombre Apellido"
+    return f"{nombre_pila} {apellido}"
+
+## Bank of Japan (BOJ - boj) - Discursos
 @st.cache_data(show_spinner=False)
 def load_data_boj(start_date_str, end_date_str):
     base_url = "https://www.boj.or.jp/en/about/press/index.htm"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 BoJ (Japón): {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+        print(f"⚠️ Error en fechas, usando rango por defecto")
+    
     rows = []
     try:
         response = requests.get(base_url, headers=headers, timeout=12)
@@ -3748,28 +3779,66 @@ def load_data_boj(start_date_str, end_date_str):
                 tds = tr.find_all('td')
                 if len(tds) < 3:
                     continue
+                
+                # === 1. EXTRAER FECHA ===
                 try:
-                    parsed_date = parser.parse(
-                        tds[0].get_text(strip=True).replace('\xa0', ' '))
+                    fecha_texto = tds[0].get_text(strip=True).replace('\xa0', ' ')
+                    parsed_date = parser.parse(fecha_texto)
                 except:
                     continue
-                if parsed_date < start_date:
+                
+                # Filtrar por rango de fechas
+                if parsed_date < start_date or parsed_date > end_date:
                     continue
+                
+                # === 2. EXTRAER AUTOR (NUEVO) ===
+                autor_raw = tds[1].get_text(strip=True)
+                autor = None
+                if autor_raw:
+                    # Limpiar el autor: eliminar "Governor", "Deputy Governor", etc.
+                    # Ejemplo: "UEDA Kazuo, Governor" -> "UEDA Kazuo"
+                    autor = re.sub(r',\s*(Governor|Deputy Governor|Member of the Policy Board)$', '', autor_raw)
+                    # Limpiar espacios extra
+                    autor = autor.strip()
+                    # === CONVERTIR NOMBRE JAPONÉS A FORMATO OCCIDENTAL ===
+                    autor = convertir_nombre_japones(autor)
+                
+                # === 3. EXTRAER TÍTULO Y ENLACE ===
                 a_tag = tds[2].find('a', href=True)
                 if not a_tag:
                     continue
+                
                 titulo_raw = a_tag.get_text(strip=True).strip('"')
-                link = "https://www.boj.or.jp" + \
-                    a_tag['href'] if a_tag['href'].startswith(
-                        '/') else a_tag['href']
-                rows.append({"Date": parsed_date, "Title": titulo_raw,
-                            "Link": link, "Organismo": "BoJ (Japón)"})
-    except:
-        pass
+                link = "https://www.boj.or.jp" + a_tag['href'] if a_tag['href'].startswith('/') else a_tag['href']
+                
+                # === 4. CONSTRUIR TÍTULO FINAL CON AUTOR ===
+                if autor:
+                    # Limpiar título: eliminar el nombre del autor si está repetido
+                    titulo_limpio = titulo_raw
+                    # Si el título comienza con el nombre del autor, lo removemos
+                    if titulo_limpio.startswith(autor.split(',')[0]):
+                        titulo_limpio = re.sub(r'^[^:：]+[:：]\s*', '', titulo_limpio)
+                    
+                    titulo_final = f"{autor}: {titulo_limpio}"
+                else:
+                    titulo_final = titulo_raw
+                
+                rows.append({
+                    "Date": parsed_date, 
+                    "Title": titulo_final, 
+                    "Link": link, 
+                    "Organismo": "BoJ (Japón)"
+                })
+                print(f"   ✅ {parsed_date.strftime('%Y-%m-%d')}: {titulo_final[:60]}...")
+    except Exception as e:
+        print(f"⚠️ Error en load_data_boj: {e}")
+    
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+    print(f"📊 BoJ (Japón) - Total final: {len(df)}")
     return df
 
 
