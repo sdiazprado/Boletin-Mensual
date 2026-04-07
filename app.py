@@ -3346,101 +3346,277 @@ def load_data_fed(anios_num):
     return df
 
 
+## Banco de Francia - BDF - Discursos 
 @st.cache_data(show_spinner=False)
 def load_data_bdf(start_date_str, end_date_str):
-    base_url = "https://www.banque-france.fr/en/governor-interventions"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    """Extractor Banco de Francia (BdF) - Discursos del Gobernador (Versión Selenium)"""
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from bs4 import BeautifulSoup
+    import datetime
+    import time
+    import re
+    from dateutil import parser
+    
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 BdF (Francia) - Selenium: {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
-    rows, page = [], 0
-    while True:
-        try:
-            response = requests.get(base_url, headers=headers, params={
-                                    'category[7052]': '7052', 'page': page}, timeout=12)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            cards = soup.find_all('div', class_=lambda c: c and 'card' in c)
-            if not cards:
-                break
-            items_found = 0
-            for card in cards:
-                a = card.find('a', href=True)
-                if not a or not a.find('span', class_='title-truncation'):
+        end_date = datetime.datetime.now()
+        print(f"⚠️ Error en fechas, usando rango por defecto")
+    
+    rows = []
+    
+    # URL principal con el filtro de discursos del Gobernador
+    url = "https://www.banque-france.fr/en/governor-interventions?category%5B7052%5D=7052"
+    
+    # Configuración de Selenium
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    try:
+        print(f"📡 Iniciando Selenium para BdF...")
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        print(f"   Navegando a: {url}")
+        driver.get(url)
+        
+        # Esperar a que cargue el contenido principal
+        time.sleep(5)
+        
+        # Scroll para activar lazy loading si existe
+        driver.execute_script("window.scrollTo(0, 1000);")
+        time.sleep(2)
+        driver.execute_script("window.scrollTo(0, 2000);")
+        time.sleep(2)
+        
+        # Extraer el HTML ya renderizado
+        html = driver.page_source
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Buscar los cards de discursos
+        cards = soup.find_all('div', class_=lambda c: c and 'card' in c if c else False)
+        
+        # Si no encuentra cards, buscar directamente con selectores más específicos
+        if not cards:
+            cards = soup.find_all('div', class_='card')
+        
+        print(f"   📚 Cards encontrados: {len(cards)}")
+        
+        # Si aún no hay cards, buscar artículos
+        if not cards:
+            cards = soup.find_all('article')
+            print(f"   📚 Artículos encontrados: {len(cards)}")
+        
+        # Mapeo de meses en inglés para fechas como "2nd of April 2026"
+        meses_map = {
+            'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+            'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+        }
+        
+        items_found = 0
+        for card in cards:
+            try:
+                # === 1. EXTRAER TÍTULO Y ENLACE ===
+                title_elem = None
+                link = None
+                
+                # Buscar h3 con clase card__title o similar
+                title_h3 = card.find('h3', class_=lambda c: c and 'card__title' in c if c else False)
+                if not title_h3:
+                    title_h3 = card.find('h3')
+                
+                if title_h3:
+                    a_tag = title_h3.find('a')
+                    if a_tag:
+                        title_elem = a_tag
+                        link = a_tag.get('href', '')
+                
+                if not title_elem:
+                    # Buscar cualquier enlace con texto largo
+                    for a in card.find_all('a', href=True):
+                        texto = a.get_text(strip=True)
+                        if len(texto) > 20:
+                            title_elem = a
+                            link = a.get('href', '')
+                            break
+                
+                if not title_elem or not link:
                     continue
-                titulo_raw, link = a.find('span', class_='title-truncation').get_text(
-                    strip=True), "https://www.banque-france.fr" + a['href']
-                date_s = card.find('small')
-                if not date_s:
+                
+                titulo = title_elem.get_text(strip=True)
+                
+                # Limpiar título (eliminar saltos de línea y espacios extra)
+                titulo = re.sub(r'\s+', ' ', titulo).strip()
+                
+                # === NUEVO: Eliminar comillas tipográficas del título original ===
+                # Eliminar comillas dobles inglesas y españolas (apertura y cierre)
+                titulo = titulo.replace('“', '').replace('”', '').replace('"', '').replace('«', '').replace('»', '')
+                # Eliminar comillas simples si existen
+                titulo = titulo.replace("'", "")
+
+                # Construir URL absoluta
+                if link.startswith('/'):
+                    link = "https://www.banque-france.fr" + link
+                
+                # === 2. EXTRAER FECHA ===
+                date_elem = None
+                date_text = None
+                
+                # Buscar div con clase card__date
+                date_div = card.find('div', class_=lambda c: c and 'card__date' in c if c else False)
+                if date_div:
+                    date_text = date_div.get_text(strip=True)
+                else:
+                    # Buscar cualquier elemento con clase que contenga 'date'
+                    date_elem = card.find(class_=re.compile(r'date', re.I))
+                    if date_elem:
+                        date_text = date_elem.get_text(strip=True)
+                
+                if not date_text:
+                    # Buscar en el texto del card
+                    card_text = card.get_text()
+                    date_match = re.search(r'(\d{1,2}(?:st|nd|rd|th)?\s+of\s+[A-Za-z]+\s+\d{4})', card_text, re.IGNORECASE)
+                    if date_match:
+                        date_text = date_match.group(1)
+                
+                if not date_text:
                     continue
-                fecha_clean = re.sub(
-                    r'(\d+)(st|nd|rd|th)\s+of\s+', r'\1 ', date_s.get_text(strip=True))
+                
+                # Limpiar fecha: eliminar "st", "nd", "rd", "th" y "of"
+                date_text = re.sub(r'(\d+)(st|nd|rd|th)\s+of\s+', r'\1 ', date_text, flags=re.IGNORECASE)
+                date_text = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', date_text)
+                date_text = date_text.strip()
+                
+                # Parsear fecha
+                parsed_date = None
                 try:
-                    parsed_date = parser.parse(fecha_clean)
+                    # Intentar parsear formatos como "2 April 2026" o "April 2, 2026"
+                    parsed_date = parser.parse(date_text)
+                    if parsed_date.tzinfo is not None:
+                        parsed_date = parsed_date.replace(tzinfo=None)
                 except:
+                    # Fallback: extraer manualmente
+                    match = re.search(r'(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})', date_text, re.IGNORECASE)
+                    if not match:
+                        match = re.search(r'([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})', date_text, re.IGNORECASE)
+                    
+                    if match:
+                        groups = match.groups()
+                        if len(groups) == 3:
+                            # Determinar si el primer grupo es día o mes
+                            if groups[0].isdigit():
+                                dia = int(groups[0])
+                                mes_str = groups[1].lower()
+                                año = int(groups[2])
+                            else:
+                                mes_str = groups[0].lower()
+                                dia = int(groups[1])
+                                año = int(groups[2])
+                            
+                            mes_num = meses_map.get(mes_str, 1)
+                            try:
+                                parsed_date = datetime.datetime(año, mes_num, min(dia, 28))
+                            except:
+                                parsed_date = datetime.datetime(año, mes_num, 1)
+                
+                if not parsed_date:
                     continue
+                
+                # === 3. FILTRAR POR FECHA ===
+                if parsed_date < start_date or parsed_date > end_date:
+                    continue
+                
+                # === 4. VERIFICAR DUPLICADOS ===
                 if not any(r['Link'] == link for r in rows):
-                    rows.append({"Date": parsed_date, "Title": titulo_raw,
-                                "Link": link, "Organismo": "BdF (Francia)"})
+                    # === NUEVO: Extraer autor desde la página del discurso ===
+                    autor = None
+                    # Solo intentar si el título no tiene ya formato "Nombre:"
+                    if not re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+:', titulo):
+                        try:
+                            headers_page = {'User-Agent': 'Mozilla/5.0'}
+                            page_response = requests.get(link, headers=headers_page, timeout=10)
+                            if page_response.status_code == 200:
+                                soup_page = BeautifulSoup(page_response.text, 'html.parser')
+                                page_text = soup_page.get_text()
+                                
+                                # === CÓDIGO CORREGIDO ===
+                                # Incluir letras acentuadas y cedilla: A-Za-zÀ-ÿç
+                                match = re.search(r'Speech by ([A-Za-zÀ-ÿç\s]+?)(?:\s+Governor|\s+of|\s*$)', page_text)
+                                if not match:
+                                    # Fallback: capturar primeras palabras después de "Speech by"
+                                    match = re.search(r'Speech by ([A-ZÀ-ÿ][a-zÀ-ÿç]+(?:\s+[A-Za-zÀ-ÿç]+)?(?:\s+[a-zÀ-ÿç]+)?(?:\s+[A-Za-zÀ-ÿç]+)?)', page_text)
+                                
+                                if match:
+                                    autor = match.group(1).strip()
+                                    # Limpiar espacios extra
+                                    autor = re.sub(r'\s+', ' ', autor)
+                                    print(f"      📝 Autor encontrado: {autor}")
+                        except:
+                            pass
+                    
+                    if autor:
+                        # Limpiar título: eliminar comillas y espacios extra
+                        titulo_limpio = titulo.strip()
+                        # Eliminar comillas dobles inglesas y españolas (apertura y cierre)
+                        for char in ['"', "'", '“', '”', '«', '»']:
+                            if titulo_limpio.startswith(char) and titulo_limpio.endswith(char):
+                                titulo_limpio = titulo_limpio[1:-1]
+                                break
+                        
+                        # Verificar si el autor ya está al inicio del título (evitar duplicados)
+                        if titulo_limpio.lower().startswith(autor.lower()):
+                            titulo_final = titulo_limpio  # No añadir autor duplicado
+                        else:
+                            titulo_final = f"{autor}: {titulo_limpio}"
+                    else:
+                        titulo_final = titulo
+                    
+                    rows.append({
+                        "Date": parsed_date,
+                        "Title": titulo_final,
+                        "Link": link,
+                        "Organismo": "BdF (Francia)"
+                    })
                     items_found += 1
-            if items_found == 0 or (rows and rows[-1]['Date'] < start_date):
-                break
-            page += 1
-            time.sleep(0.3)
-        except:
-            break
+                    print(f"   ✅ {parsed_date.strftime('%Y-%m-%d')}: {titulo_final[:60]}...")
+                    items_found += 1
+                
+            except Exception as e:
+                print(f"   ⚠️ Error procesando card: {e}")
+                continue
+        
+        print(f"   📊 Documentos encontrados en BdF: {items_found}")
+        driver.quit()
+        
+    except Exception as e:
+        print(f"❌ Error en load_data_bdf: {e}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame()
+    
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
-    return df
-
-
-@st.cache_data(show_spinner=False)
-def load_data_bm(start_date_str, end_date_str):
-    base_url = "https://openknowledge.worldbank.org/server/api/discover/search/objects"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
-    except:
-        start_date = datetime.datetime(2000, 1, 1)
-    rows, page = [], 0
-    while True:
-        try:
-            res = requests.get(base_url, headers=headers, params={
-                               'scope': 'b6a50016-276d-56d3-bbe5-891c8d18db24', 'sort': 'dc.date.issued,DESC', 'page': page, 'size': 20}, timeout=12)
-            objects = res.json().get('_embedded', {}).get(
-                'searchResult', {}).get('_embedded', {}).get('objects', [])
-            if not objects:
-                break
-            items_found = 0
-            for obj in objects:
-                item = obj.get('_embedded', {}).get('indexableObject', {})
-                meta = item.get('metadata', {})
-                title = meta.get('dc.title', [{'value': ''}])[
-                    0].get('value', '')
-                date_s = meta.get('dc.date.issued', [{'value': ''}])[
-                    0].get('value', '')
-                try:
-                    parsed_date = parser.parse(date_s)
-                except:
-                    continue
-                link = meta.get('dc.identifier.uri', [{'value': ''}])[0].get(
-                    'value', '') or f"https://openknowledge.worldbank.org/entities/publication/{item.get('id', '')}"
-                if not any(r['Link'] == link for r in rows):
-                    rows.append({"Date": parsed_date, "Title": title,
-                                "Link": link, "Organismo": "BM"})
-                    items_found += 1
-            if items_found == 0 or (rows and rows[-1]['Date'] < start_date):
-                break
-            page += 1
-            time.sleep(0.3)
-        except:
-            break
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df["Date"] = pd.to_datetime(df["Date"])
-        df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+    
+    print(f"📊 BdF (Francia) - Total final: {len(df)}")
     return df
 
 
