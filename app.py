@@ -4106,27 +4106,49 @@ def load_data_bde(start_date_str, end_date_str):
                         if pdf_link:
                             print(f"      📄 PDF encontrado, extrayendo autor...")
                             autor, cargo = extraer_autor_y_cargo_desde_pdf(pdf_link)
+                            # Dentro de load_data_bde(), después de encontrar el autor
                             if autor:
-                                print(f"      ✅ Autor encontrado: {autor} ({cargo})")
-                                # Limpiar título: eliminar el cargo del inicio
                                 titulo_limpio = raw_title
                                 
-                                # 🔧 LIMPIEZA DIRECTA: eliminar "D.G. Economía. " específicamente
-                                titulo_limpio = titulo_limpio.replace('D.G. Economía. ', '')
-                                titulo_limpio = titulo_limpio.replace('Deputy Governor. ', '')
-                                titulo_limpio = titulo_limpio.replace('Governor. ', '')
-                                titulo_limpio = titulo_limpio.replace('Subgobernadora. ', '')
+                                # ========== NUEVA LIMPIEZA MEJORADA ==========
+                                # Eliminar patrones comunes de cargo (en español e inglés)
+                                patrones_cargo = [
+                                    r'D\.G\.\s*Econom[íi]a\.\s*',      # D.G. Economía. o D.G. Economics.
+                                    r'D\.G\.\s*Economics\.\s*',         # D.G. Economics.
+                                    r'Deputy\s*Governor\.\s*',          # Deputy Governor.
+                                    r'Governor\.\s*',                   # Governor.
+                                    r'Subgobernador[a]?\.\s*',          # Subgobernadora. o Subgobernador.
+                                    r'Director\s*General\.\s*',         # Director General.
+                                    r'Head\s*of\s*\w+\.\s*',            # Head of Department.
+                                    r'Director\.\s*',                   # Director.
+                                    r'Chief\s*Economist\.\s*',          # Chief Economist.
+                                    r'Gerente\s*General\.\s*',          # Gerente General.
+                                    r'Vicepresident[ae]\.\s*',          # Vicepresidenta. o Vicepresidente.
+                                    r'President[ae]\.\s*',              # Presidenta. o Presidente.
+                                ]
+                                
+                                for patron in patrones_cargo:
+                                    titulo_limpio = re.sub(patron, '', titulo_limpio, flags=re.IGNORECASE)
+                                
+                                # También eliminar cualquier texto entre paréntesis que parezca un cargo
+                                titulo_limpio = re.sub(r'\s*\([^)]*(?:D\.G\.|Governor|Director|Econom[íi]a)[^)]*\)\s*', ' ', titulo_limpio, flags=re.IGNORECASE)
+                                
+                                # Limpiar espacios múltiples y puntos al inicio
+                                titulo_limpio = re.sub(r'\s+', ' ', titulo_limpio).strip()
+                                titulo_limpio = re.sub(r'^\.\s*', '', titulo_limpio)
                                 
                                 # Construir título final
                                 titulo_final = f"{autor}: {titulo_limpio}"
                                 
-                                # Limpieza adicional: eliminar espacios múltiples
-                                titulo_final = re.sub(r'\s+', ' ', titulo_final).strip()
+                                # Limpieza adicional: eliminar " : " si el título está vacío
+                                titulo_final = re.sub(r':\s*$', '', titulo_final)
                                 
                                 print(f"      📝 Título limpio: {titulo_final[:80]}...")
+                            
                             else:
                                 print(f"      ⚠️ No se pudo extraer autor, usando formato estándar")
                                 titulo_final = re.sub(r'\.\s+', ': ', raw_title, count=1)
+                                titulo_final = re.sub(r'\s+', ' ', titulo_final).strip()
                     else:
                         titulo_final = re.sub(r'\.\s+', ': ', raw_title, count=1)
                         
@@ -4153,6 +4175,7 @@ def load_data_bde(start_date_str, end_date_str):
     
     print(f"📊 BdE (España) - Total final: {len(df)}")
     return df
+    
 # ==========================================
 # EXPORTACIÓN A WORD
 # ==========================================
