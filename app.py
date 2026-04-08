@@ -3724,8 +3724,16 @@ def load_data_bdf(start_date_str, end_date_str):
 ## Banco de Canadá (BOC , boc)
 @st.cache_data(show_spinner=False)
 def load_data_boc(start_date_str, end_date_str):
-    base_url = "https://www.bankofcanada.ca/press/speeches/"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    """Extractor Banco de Canadá (BoC) - Versión corregida con prioridad a conferencias"""
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from bs4 import BeautifulSoup
+    import datetime
+    import time
+    import re
+    from dateutil import parser
+    import requests
+
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
         end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
@@ -3735,98 +3743,194 @@ def load_data_boc(start_date_str, end_date_str):
         end_date = datetime.datetime.now()
         print(f"⚠️ Error en fechas, usando rango por defecto")
     
-    rows, page = [], 1
+    rows = []
+    page = 1
+    
+    def limpiar_titulo(titulo):
+        """Limpia el título de texto basura"""
+        titulo = re.sub(r'(?i)^Speech\s*[:\-]\s*', '', titulo)
+        titulo = re.sub(r'(?i)^Remarks\s*[:\-]\s*', '', titulo)
+        titulo = re.sub(r'(?i)^Opening\s+statement\s*[:\-]\s*', '', titulo)
+        titulo = re.sub(r'(?i)^Fireside\s+chat\s*[:\-]\s*', '', titulo)
+        titulo = re.sub(r'(?i)^Press\s+Conference\s*[:\-]\s*', '', titulo)
+        return titulo.strip()
+    
+    def extraer_autor_desde_html(soup_page, titulo_raw, url):
+        """Extrae el autor basado en el contenido específico de cada página"""
+        
+        page_text = soup_page.get_text()
+        
+        # === 1. PRIORIDAD MÁXIMA: Conferencias de prensa (webcasts) ===
+        # Verificar si es un webcast (video) por la URL o el título
+        is_webcast = 'multimedia' in url or 'webcast' in titulo_raw.lower()
+        
+        if 'press conference' in titulo_raw.lower():
+            if is_webcast:
+                # Solo para webcasts/videos, asignar ambos autores
+                if 'Tiff Macklem' in page_text and 'Carolyn Rogers' in page_text:
+                    return "Tiff Macklem and Carolyn Rogers"
+                if 'Tiff Macklem' in page_text:
+                    return "Tiff Macklem"
+                if 'Carolyn Rogers' in page_text:
+                    return "Carolyn Rogers"
+                return "Bank of Canada"
+            else:
+                # Para textos (opening statements), solo Tiff Macklem
+                if 'Tiff Macklem' in page_text:
+                    return "Tiff Macklem"
+                if 'Carolyn Rogers' in page_text:
+                    return "Carolyn Rogers"
+                return "Bank of Canada"
+        
+        # === 2. Opening statements (no son conferencias de prensa) ===
+        if 'opening statement' in titulo_raw.lower() or 'opening' in titulo_raw.lower():
+            if 'Tiff Macklem' in page_text:
+                return "Tiff Macklem"
+            if 'Carolyn Rogers' in page_text:
+                return "Carolyn Rogers"
+        
+        # === 3. Sharon Kozicki ===
+        if 'Sharon Kozicki' in page_text and ('Deputy Governor' in page_text or 'speech summary' in page_text.lower()):
+            return "Sharon Kozicki"
+        
+        # === 4. Tiff Macklem ===
+        if 'Tiff Macklem' in page_text and ('Governor' in page_text or 'remarks' in page_text.lower()):
+            return "Tiff Macklem"
+        
+        # === 5. Carolyn Rogers ===
+        if 'Carolyn Rogers' in page_text and ('Senior Deputy Governor' in page_text or 'speech summary' in page_text.lower()):
+            return "Carolyn Rogers"
+        
+        # === 6. Fallback a media-authors ===
+        author_span = soup_page.find('span', class_='media-authors')
+        if author_span:
+            author_link = author_span.find('a')
+            if author_link:
+                return author_link.text.strip()
+        
+        return None
+    
     while True:
         try:
-            res = requests.get(base_url, headers=headers, params={'mt_page': page}, timeout=12)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            articles = soup.find_all('div', class_=lambda c: c and ('mtt-result' in c or 'media' in c))
+            if page == 1:
+                url = "https://www.bankofcanada.ca/press/speeches/"
+            else:
+                url = f"https://www.bankofcanada.ca/press/speeches/page/{page}/"
+            
+            print(f"📄 Procesando página {page}: {url}")
+            
+            chrome_options = Options()
+            chrome_options.add_argument('--headless=new')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            
+            driver = webdriver.Chrome(options=chrome_options)
+            driver.get(url)
+            time.sleep(5)
+            
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            driver.quit()
+            
+            articles = soup.find_all('div', class_=lambda c: c and ('mtt-result' in c or 'media' in c or 'entry' in c))
+            
             if not articles:
+                articles = soup.find_all('article')
+            
+            if not articles:
+                print(f"   📭 No hay más artículos en página {page}")
                 break
+            
+            print(f"   📚 Artículos encontrados: {len(articles)}")
             items_found = 0
+            
             for art in articles:
                 h3 = art.find('h3', class_='media-heading')
-                if not h3 or not h3.find('a'):
+                if not h3:
+                    h3 = art.find('h3')
+                if not h3:
                     continue
-                titulo_raw = h3.find('a').text.strip()
-                link = h3.find('a')['href']
-                date_s = art.find('span', class_='media-date')
+                
+                a_tag = h3.find('a')
+                if not a_tag:
+                    continue
+                
+                titulo_raw = a_tag.text.strip()
+                link = a_tag['href']
+                
+                date_elem = art.find('span', class_='media-date')
+                if not date_elem:
+                    date_elem = art.find('time')
+                if not date_elem:
+                    date_elem = art.find(class_=re.compile(r'date', re.I))
+                
+                if not date_elem:
+                    continue
+                
                 try:
-                    parsed_date = parser.parse(date_s.text.strip())
+                    fecha_texto = date_elem.text.strip()
+                    parsed_date = parser.parse(fecha_texto)
                 except:
                     continue
                 
                 if parsed_date < start_date or parsed_date > end_date:
                     continue
                 
-                if not any(r['Link'] == link for r in rows):
-                    # === NUEVO: Extraer autor desde la página del discurso ===
-                    autor = None
-                    
-                    # Saltar si es Press Conference (no tiene autor individual)
-                    if 'press conference' in titulo_raw.lower():
-                        autor = "Bank of Canada"
-                    else:
-                        try:
-                            headers_page = {'User-Agent': 'Mozilla/5.0'}
-                            page_response = requests.get(link, headers=headers_page, timeout=10)
-                            if page_response.status_code == 200:
-                                soup_page = BeautifulSoup(page_response.text, 'html.parser')
-                                page_text = soup_page.get_text()
-                                
-                                # Buscar patrones de autor en el texto
-                                # Patrón 1: "Carolyn Rogers" (nombre al inicio del texto)
-                                # Patrón 2: "Senior Deputy Governor Carolyn Rogers"
-                                # Patrón 3: "Speech by Carolyn Rogers"
-                                
-                                # Buscar nombres conocidos (puedes ampliar esta lista)
-                                posibles_autores = [
-                                    "Carolyn Rogers", "Tiff Macklem", "Paul Beaudry", 
-                                    "Lawrence Schembri", "Timothy Lane", "Sharon Kozicki",
-                                    "Nicolas Vincent", "Toni Gravelle"
-                                ]
-                                
-                                for nombre in posibles_autores:
-                                    if nombre in page_text:
-                                        autor = nombre
-                                        break
-                                
-                                # Si no encontró en la lista, buscar patrón "Speech by X"
-                                if not autor:
-                                    match = re.search(r'(?:Speech by|By|Speaker:)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})', page_text)
-                                    if match:
-                                        autor = match.group(1).strip()
-                        except:
-                            pass
-                    
-                    # Construir título final
-                    if autor:
-                        # Limpiar título: eliminar "Speech:" del inicio si existe
-                        titulo_limpio = re.sub(r'^Speech:\s*', '', titulo_raw)
-                        titulo_final = f"{autor}: {titulo_limpio}"
-                    else:
-                        titulo_final = titulo_raw
-                    
-                    rows.append({
-                        "Date": parsed_date, 
-                        "Title": titulo_final, 
-                        "Link": link, 
-                        "Organismo": "BoC (Canadá)"
-                    })
-                    items_found += 1
-                    print(f"   ✅ {parsed_date.strftime('%Y-%m-%d')}: {titulo_final[:60]}...")
-            if items_found == 0 or (rows and rows[-1]['Date'] < start_date):
+                if any(r['Link'] == link for r in rows):
+                    continue
+                
+                print(f"   🔍 Procesando: {parsed_date.strftime('%Y-%m-%d')} - {titulo_raw[:50]}...")
+                
+                autor = None
+                
+                try:
+                    headers = {'User-Agent': 'Mozilla/5.0'}
+                    response = requests.get(link, headers=headers, timeout=10)
+                    if response.status_code == 200:
+                        soup_page = BeautifulSoup(response.text, 'html.parser')
+                        autor = extraer_autor_desde_html(soup_page, titulo_raw, link)
+                        if autor:
+                            print(f"      📝 Autor encontrado: {autor}")
+                except Exception as e:
+                    print(f"      ⚠️ Error obteniendo página: {e}")
+                
+                titulo_limpio = limpiar_titulo(titulo_raw)
+                
+                if autor:
+                    # Limpiar "Governor" del autor si está presente
+                    autor_limpio = re.sub(r'^Governor\s+', '', autor)
+                    titulo_final = f"{autor_limpio}: {titulo_limpio}"
+                else:
+                    titulo_final = titulo_limpio
+                
+                titulo_final = re.sub(r'\s+', ' ', titulo_final).strip()
+                
+                rows.append({
+                    "Date": parsed_date,
+                    "Title": titulo_final,
+                    "Link": link,
+                    "Organismo": "BoC (Canadá)"
+                })
+                items_found += 1
+                print(f"      ✅ Agregado: {titulo_final[:80]}...")
+            
+            if items_found == 0:
                 break
+            
             page += 1
-            time.sleep(0.3)
+            time.sleep(1)
+            
         except Exception as e:
             print(f"   ⚠️ Error en página {page}: {e}")
             break
+    
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
         df = df.drop_duplicates(subset=['Link'])
+    
     print(f"📊 BoC (Canadá) - Total final: {len(df)}")
     return df
 
