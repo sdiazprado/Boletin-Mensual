@@ -16,6 +16,8 @@ import time
 import re
 from dateutil import parser
 import urllib.parse # Necesario para la herramienta de rescate
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==========================================
 # CONFIGURACIÓN INICIAL Y ESTILOS
@@ -800,60 +802,149 @@ def load_reportes_cef(start_date_str, end_date_str):
     return df
 
 
+# -- OCDE -- REPORTES -- 
 @st.cache_data(show_spinner=False)
 def load_reportes_ocde(start_date_str, end_date_str):
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    rows = []
+    """Extractor OCDE - Reports (API oficial)"""
+    import requests
+    import datetime
+    import re
+    import time
+    from dateutil import parser
+
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 OCDE Reportes: {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
-    year = start_date.year
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
+        end_date = datetime.datetime.now()
+
+    rows = []
+
+    # API base de la OCDE
+    base_url = "https://api.oecd.org/webcms/search/faceted-search"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+    }
+
+    page = 0
+    page_size = 50  # Número de resultados por página
+    max_pages = 10  # Límite de seguridad
+    documentos_procesados = 0
+
+    print("📡 Solicitando Reportes a la API de la OCDE (con paginación)...")
+
     try:
-        driver = webdriver.Chrome(options=chrome_options)
-        url = f"https://www.oecd.org/en/search/publications.html?orderBy=mostRecent&page=0&facetTags=oecd-content-types%3Apublications%2Freports%2Coecd-languages%3Aen&minPublicationYear={year}&maxPublicationYear={year}"
-        driver.get(url)
-        time.sleep(12)
-        js_script = """
-        let linksData = [];
-        function findLinks(root) {
-            let els = root.querySelectorAll('*');
-            els.forEach(el => {
-                if (el.shadowRoot) findLinks(el.shadowRoot);
-                if (el.tagName === 'A' && el.href) {
-                    let text = el.innerText || el.textContent;
-                    let aria = el.getAttribute('aria-label') || el.getAttribute('title') || '';
-                    let final_text = text.trim() ? text.trim() : aria.trim();
-                    if(final_text.length > 15) { linksData.push({ title: final_text, link: el.href }); }
-                }
-            });
-        }
-        findLinks(document); return linksData;
-        """
-        extracted_links = driver.execute_script(js_script)
-        driver.quit()
-        for item in extracted_links:
-            href = item['link'].lower()
-            title = item['title'].replace('\n', ' ')
-            firmas_validas = ['/publications/',
-                              '/reports/', 'oecd-ilibrary.org', '/books/']
-            if any(firma in href for firma in firmas_validas):
-                if any(basura in title.lower() for x in ['download', 'read more', 'pdf', 'buy', 'search', 'subscribe']):
+        while page < max_pages:
+            # Parámetros para buscar Reports en inglés
+            params = {
+                "siteName": "oecd",
+                "interfaceLanguage": "en",
+                "orderBy": "mostRecent",
+                "pageSize": page_size,
+                "page": page,
+                "facets": "oecd-languages:en",
+                "hiddenFacets": "oecd-content-types:publications/reports"  # <-- FILTRO PARA REPORTES
+            }
+
+            print(f"   📄 Procesando página {page + 1}...")
+            response = requests.get(base_url, params=params, headers=headers, timeout=15)
+
+            if response.status_code != 200:
+                print(f"   ❌ Error en página {page + 1}: {response.status_code}")
+                break
+
+            data = response.json()
+
+            # Buscar los resultados
+            results = data.get("results", [])
+
+            if not results:
+                print(f"   📭 No hay más resultados en página {page + 1}")
+                break
+
+            documentos_en_pagina = 0
+            fecha_mas_antigua = None
+
+            for item in results:
+                titulo = item.get("title", "") or item.get("name", "")
+                link = item.get("url", "") or item.get("link", "")
+
+                if not titulo or not link:
                     continue
-                if not any(r['Link'] == item['link'] for r in rows):
-                    rows.append({"Date": start_date, "Title": title,
-                                "Link": item['link'], "Organismo": "OCDE"})
-    except:
-        pass
+
+                # Extraer fecha
+                fecha_texto = item.get("publicationDateTime", "")
+                parsed_date = None
+                if fecha_texto:
+                    try:
+                        parsed_date = parser.parse(fecha_texto)
+                        if parsed_date.tzinfo is not None:
+                            parsed_date = parsed_date.replace(tzinfo=None)
+                    except:
+                        continue
+
+                if not parsed_date:
+                    continue
+
+                fecha_mas_antigua = parsed_date
+
+                # Si el documento es más antiguo que start_date, paramos
+                if parsed_date < start_date:
+                    print(f"   ⏹️ Documento más antiguo que {start_date.strftime('%Y-%m')}, deteniendo paginación")
+                    page = max_pages
+                    break
+
+                # Filtrar por rango de fechas
+                if parsed_date >= start_date and parsed_date <= end_date:
+                    # Limpiar título
+                    titulo = re.sub(r'\s+', ' ', titulo).strip()
+
+                    # Asegurar URL absoluta
+                    if link.startswith('/'):
+                        link = f"https://www.oecd.org{link}"
+
+                    rows.append({
+                        "Date": parsed_date,
+                        "Title": titulo,
+                        "Link": link,
+                        "Organismo": "OCDE"
+                    })
+                    documentos_en_pagina += 1
+                    documentos_procesados += 1
+
+            print(f"   📊 Página {page + 1}: {documentos_en_pagina} documentos en el rango")
+
+            # Si no encontramos documentos en esta página y ya pasamos la fecha límite
+            if documentos_en_pagina == 0 and fecha_mas_antigua and fecha_mas_antigua < start_date:
+                print(f"   ⏹️ Fin de resultados para el mes solicitado")
+                break
+
+            # Si encontramos menos de page_size documentos, probablemente es la última página
+            if len(results) < page_size:
+                print(f"   📭 Última página alcanzada")
+                break
+
+            page += 1
+            time.sleep(0.3)  # Pequeña pausa para no sobrecargar la API
+
+        print(f"\n📊 Total Reportes OCDE encontrados: {documentos_procesados}")
+
+    except Exception as e:
+        print(f"❌ Error en load_reportes_ocde: {e}")
+        import traceback
+        traceback.print_exc()
+
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+
+    print(f"📊 OCDE Reportes - Total final: {len(df)}")
     return df
 
 
@@ -929,92 +1020,295 @@ def load_reportes_bpi(start_date_str, end_date_str):
         df = df.sort_values("Date", ascending=False)
     return df
 
+
+
+
 # --- SECCIÓN: PUBLICACIONES INSTITUCIONALES ---
-def load_pub_inst_oei(start_date_str, end_date_str):
-    """Extractor OEI (IEO-IMF) - Versión Selenium con Buscador Recursivo"""
-    import undetected_chromedriver as uc
-    from bs4 import BeautifulSoup
-    import json
+
+# --- Publicaciones Institucionales --- OCDE 
+
+@st.cache_data(show_spinner=False)
+def load_pub_inst_ocde(start_date_str, end_date_str):
+    """Extractor OCDE - Publicaciones Institucionales (API oficial)"""
+    import requests
+    import datetime
+    import re
     import time
     from dateutil import parser
-    import datetime
-
-    # Configuración de fechas
+    
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
         end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 OCDE Pub. Institucionales: {start_date.date()} a {end_date.date()}")
     except:
-        start_date = datetime.datetime.now() - datetime.timedelta(days=365)
+        start_date = datetime.datetime(2000, 1, 1)
         end_date = datetime.datetime.now()
-
-    url = "https://ieo.imf.org/en/publications/annual-reports"
-    options = uc.ChromeOptions()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    # Si usas Linux/Streamlit Cloud, descomenta la siguiente línea:
-    # options.binary_location = '/usr/bin/chromium'
-
+    
     rows = []
-    driver = None
+    
+    # API base de la OCDE
+    base_url = "https://api.oecd.org/webcms/search/faceted-search"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+    }
+    
+    page = 0
+    page_size = 50
+    max_pages = 10
+    
+    print("📡 Solicitando Publicaciones Institucionales a la API de la OCDE (con paginación)...")
     
     try:
-        driver = uc.Chrome(options=options)
-        driver.get(url)
-        time.sleep(6) # Tiempo para hidratación de JS
-        
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        script_tag = soup.find('script', id='__NEXT_DATA__')
-        
-        if script_tag:
-            data = json.loads(script_tag.string)
+        while page < max_pages:
+            # Parámetros para buscar el sub-tema psi114
+            params = {
+                "siteName": "oecd",
+                "interfaceLanguage": "en",
+                "orderBy": "mostRecent",
+                "pageSize": page_size,
+                "page": page,
+                "facets": "oecd-languages:en",
+                "hiddenFacets": "oecd-policy-subissues:psi114"  # <-- FILTRO PARA PUB. INSTITUCIONALES
+            }
             
-            # --- BUSCADOR RECURSIVO ---
-            def encontrar_resultados(obj):
-                if isinstance(obj, dict):
-                    if 'reports' in obj and isinstance(obj['reports'], dict) and 'results' in obj['reports']:
-                        return obj['reports']['results']
-                    for v in obj.values():
-                        res = encontrar_resultados(v)
-                        if res: return res
-                elif isinstance(obj, list):
-                    for item in obj:
-                        res = encontrar_resultados(item)
-                        if res: return res
-                return None
-
-            results = encontrar_resultados(data)
+            print(f"   📄 Procesando página {page + 1}...")
+            response = requests.get(base_url, params=params, headers=headers, timeout=15)
             
-            if results:
-                for item in results:
-                    titulo = item.get('title', {}).get('jsonValue', {}).get('value', '')
-                    fecha_raw = item.get('publicationDate', {}).get('jsonValue', {}).get('value', '')
+            if response.status_code != 200:
+                print(f"   ❌ Error en página {page + 1}: {response.status_code}")
+                break
+            
+            data = response.json()
+            
+            # Buscar los resultados
+            results = data.get("results", [])
+            
+            if not results:
+                print(f"   📭 No hay más resultados en página {page + 1}")
+                break
+            
+            documentos_en_pagina = 0
+            fecha_mas_antigua = None
+            
+            for item in results:
+                titulo = item.get("title", "") or item.get("name", "")
+                link = item.get("url", "") or item.get("link", "")
+                
+                if not titulo or not link:
+                    continue
+                
+                # Extraer fecha
+                fecha_texto = item.get("publicationDateTime", "")
+                
+                parsed_date = None
+                if fecha_texto:
+                    try:
+                        parsed_date = parser.parse(fecha_texto)
+                        if parsed_date.tzinfo is not None:
+                            parsed_date = parsed_date.replace(tzinfo=None)
+                    except:
+                        continue
+                
+                if not parsed_date:
+                    continue
+                
+                fecha_mas_antigua = parsed_date
+                
+                # Si el documento es más antiguo que start_date, paramos
+                if parsed_date < start_date:
+                    print(f"   ⏹️ Documento más antiguo que {start_date.strftime('%Y-%m')}, deteniendo paginación")
+                    page = max_pages
+                    break
+                
+                # Filtrar por rango de fechas
+                if parsed_date >= start_date and parsed_date <= end_date:
+                    # Limpiar título
+                    titulo = re.sub(r'\s+', ' ', titulo).strip()
                     
-                    # Link (PDF > URL)
-                    l_val = item.get('completedReportLink', {}).get('jsonValue', {}).get('value', {})
-                    link = l_val.get('href', '') if isinstance(l_val, dict) else ""
-                    if not link:
-                        link = item.get('url', {}).get('url', '')
+                    # Asegurar URL absoluta
+                    if link.startswith('/'):
+                        link = f"https://www.oecd.org{link}"
                     
-                    if link and link.startswith('/'):
-                        link = "https://ieo.imf.org" + link
-                    
-                    if titulo and fecha_raw:
-                        p_date = parser.parse(fecha_raw).replace(tzinfo=None)
-                        if start_date <= p_date <= end_date:
-                            rows.append({
-                                "Date": p_date,
-                                "Title": titulo,
-                                "Link": link,
-                                "Organismo": "OEI"
-                            })
+                    rows.append({
+                        "Date": parsed_date,
+                        "Title": titulo,
+                        "Link": link,
+                        "Organismo": "OCDE"
+                    })
+                    documentos_en_pagina += 1
+            
+            print(f"   📊 Página {page + 1}: {documentos_en_pagina} documentos en el rango")
+            
+            # Si no encontramos documentos en esta página y ya pasamos la fecha límite
+            if documentos_en_pagina == 0 and fecha_mas_antigua and fecha_mas_antigua < start_date:
+                print(f"   ⏹️ Fin de resultados para el mes solicitado")
+                break
+            
+            # Si encontramos menos de page_size documentos, probablemente es la última página
+            if len(results) < page_size:
+                print(f"   📭 Última página alcanzada")
+                break
+            
+            page += 1
+            time.sleep(0.3)
+        
+        print(f"\n📊 Total documentos OCDE Pub. Institucionales encontrados: {len(rows)}")
+        
     except Exception as e:
-        print(f"Error Selenium OEI: {e}")
-    finally:
-        if driver: driver.quit()
+        print(f"❌ Error en load_pub_inst_ocde: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+    
+    print(f"📊 OCDE Pub. Institucionales - Total final: {len(df)}")
+    return df
 
-    return pd.DataFrame(rows).sort_values("Date", ascending=False)
-
+# --- Publicaciones Institucionales --- OEI 
+@st.cache_data(show_spinner=False)
+def load_pub_inst_oei(start_date_str, end_date_str):
+    """Extractor OEI (IEO-IMF) - Versión API Next.js con headers completos"""
+    import requests
+    import datetime
+    import re
+    from dateutil import parser
+    
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 OEI: {start_date.date()} a {end_date.date()}")
+    except:
+        start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+    
+    rows = []
+    
+    # Intentar obtener el build ID dinámicamente desde la página HTML
+    build_id = "qchYZivFKVMGvRneSTtnM"  # Fallback
+    try:
+        headers_browser = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        }
+        res = requests.get("https://ieo.imf.org/en/Publications/annual-reports", headers=headers_browser, timeout=15)
+        # Buscar el build ID en el HTML
+        match = re.search(r'/_next/data/([a-zA-Z0-9]+)/en/publications/annual-reports\.json', res.text)
+        if match:
+            build_id = match.group(1)
+            print(f"🔧 Build ID encontrado: {build_id}")
+    except Exception as e:
+        print(f"⚠️ Usando build ID por defecto: {build_id}")
+    
+    # URL del JSON
+    url = f"https://ieo.imf.org/_next/data/{build_id}/en/publications/annual-reports.json"
+    
+    # Headers completos para simular un navegador real
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://ieo.imf.org/en/Publications/annual-reports',
+        'Origin': 'https://ieo.imf.org',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+    }
+    
+    try:
+        print(f"📡 Consultando: {url}")
+        response = requests.get(url, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # ✅ RUTA CORRECTA según el JSON que analizamos
+            try:
+                # Los reportes están en componentProps.[id].fields.datasource.reports.results
+                component_props = data.get('pageProps', {}).get('componentProps', {})
+                
+                # Buscar el componente ReportsListing
+                reports_results = None
+                for comp_id, comp_value in component_props.items():
+                    if 'fields' in comp_value and 'datasource' in comp_value['fields']:
+                        datasource = comp_value['fields']['datasource']
+                        if 'reports' in datasource and 'results' in datasource['reports']:
+                            reports_results = datasource['reports']['results']
+                            print(f"✅ Componente encontrado: {comp_id}")
+                            break
+                
+                if not reports_results:
+                    print("⚠️ No se encontraron reportes en componentProps")
+                    return pd.DataFrame()
+                
+                print(f"📚 Reportes encontrados: {len(reports_results)}")
+                
+                for report in reports_results:
+                    # Extraer título
+                    titulo = report.get('title', {}).get('jsonValue', {}).get('value', '')
+                    
+                    # Extraer fecha
+                    fecha_texto = report.get('publicationDate', {}).get('jsonValue', {}).get('value', '')
+                    
+                    # Extraer link del PDF
+                    completed_link = report.get('completedReportLink', {}).get('jsonValue', {}).get('value', {})
+                    link = completed_link.get('href', '') if isinstance(completed_link, dict) else ''
+                    
+                    if not titulo or not fecha_texto:
+                        continue
+                    
+                    # Parsear fecha
+                    parsed_date = parser.parse(fecha_texto).replace(tzinfo=None)
+                    
+                    if parsed_date < start_date or parsed_date > end_date:
+                        continue
+                    
+                    rows.append({
+                        "Date": parsed_date,
+                        "Title": titulo,
+                        "Link": link,
+                        "Organismo": "OEI"
+                    })
+                    print(f"   ✅ {parsed_date.strftime('%Y-%m-%d')}: {titulo}")
+                
+            except Exception as e:
+                print(f"   ⚠️ Error procesando el JSON: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"❌ Error en la API: {response.status_code}")
+            print(f"   Respuesta: {response.text[:200] if response.text else 'Vacía'}")
+            
+    except Exception as e:
+        print(f"❌ Error en load_pub_inst_oei: {e}")
+    
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+    
+    print(f"📊 OEI - Total documentos: {len(df)}")
+    return df
+    
 # ========== FUNCIÓN PARA CEMLA (PUBLICACIONES INSTITUCIONALES) ==========
 @st.cache_data(show_spinner=False)
 def load_pub_inst_cemla(start_date_str, end_date_str):
@@ -1421,6 +1715,96 @@ def load_pub_inst_cef(start_date_str, end_date_str):
         df = df.sort_values("Date", ascending=False)
     return df
 
+# ========== FUNCIÓN UNIVERSAL PARA NOTICIAS DEL FMI (API COVEO) ==========
+@st.cache_data(show_spinner=False)
+def load_fmi_news_all(start_date_str, end_date_str):
+    """
+    Extrae TODAS las noticias del FMI usando la API de Coveo.
+    Incluye Press Releases, Mission Concluding, Statements, News Articles, etc.
+    """
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 FMI News (API Coveo): {start_date.date()} a {end_date.date()}")
+    except:
+        start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+        print(f"⚠️ Error en fechas, usando rango por defecto")
+
+    rows = []
+    url = "https://imfproduction561s308u.org.coveo.com/rest/search/v2?organizationId=imfproduction561s308u"
+
+    headers = {
+        "Authorization": "Bearer xx742a6c66-f427-4f5a-ae1e-770dc7264e8a",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Origin": "https://www.imf.org",
+        "Referer": "https://www.imf.org/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+
+    # Filtro para capturar TODO excepto discursos
+    payload = {
+        "aq": "@imftype==(\"News Article\",\"Press Release\",\"Communique\",\"Mission Concluding Statement\",\"News Brief\",\"Public Information Notice\",\"Statements at Donor Meeting\",\"Views and Commentaries\",\"Blog Page\",\"IMF Staff Country Reports\") AND NOT @imftype==(\"Speech\",\"Transcript\") AND @syslanguage==\"English\"",
+        "numberOfResults": 300,
+        "sortCriteria": "@imfdate descending"
+    }
+
+    try:
+        print("📡 Solicitando noticias del FMI a la API de Coveo...")
+        # Deshabilitar verificación SSL para evitar errores locales
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        res = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+
+        if res.status_code == 200:
+            data = res.json()
+            print(f"✅ Respuesta recibida. Total en API: {data.get('totalCount', 0)} resultados")
+
+            for item in data.get("results", []):
+                titulo = item.get("title", "").strip()
+                link = item.get("clickUri", "")
+                content_type = item.get("raw", {}).get("imftype", "Unknown")
+
+                raw_date = item.get("raw", {}).get("date")
+                parsed_date = None
+                if raw_date:
+                    try:
+                        parsed_date = datetime.datetime.fromtimestamp(raw_date / 1000.0)
+                    except:
+                        pass
+
+                if not titulo or not link or not parsed_date:
+                    continue
+
+                if start_date <= parsed_date <= end_date:
+                    if not any(r['Link'] == link for r in rows):
+                        rows.append({
+                            "Date": parsed_date,
+                            "Title": titulo,
+                            "Link": link,
+                            "Organismo": "FMI"
+                        })
+                        print(f"   ✅ [{content_type[:25]}] {parsed_date.strftime('%Y-%m-%d')}: {titulo[:60]}...")
+        else:
+            print(f"❌ Error en la API: {res.status_code}")
+            print(f"   Respuesta: {res.text[:200]}")
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date", ascending=False)
+        print(f"\n✅ TOTAL FMI News (API): {len(df)} documentos")
+    else:
+        print("⚠️ No se encontraron documentos")
+
+    return df
+
+
+# -- BPI -- Publicaciones Institucionales 
 
 @st.cache_data(show_spinner=False)
 def load_pub_inst_bpi(start_date_str, end_date_str):
@@ -1461,11 +1845,15 @@ def load_pub_inst_bpi(start_date_str, end_date_str):
 
 @st.cache_data(show_spinner=False)
 def load_country_reports_fmi(start_date_str, end_date_str):
-    """Extractor FMI - Country Reports (Conexión Directa a Coveo API)"""
+    """Extractor FMI - Country Reports + Article IV (Conexión Directa a Coveo API) con filtro anti-Coming Soon"""
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 FMI Country Reports: {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now() + datetime.timedelta(days=365)
+        print(f"⚠️ Error en fechas, usando rango por defecto")
 
     rows = []
 
@@ -1481,17 +1869,22 @@ def load_country_reports_fmi(start_date_str, end_date_str):
 
     # 2. EL PAYLOAD (Falsificamos la petición del buscador)
     payload = {
-        "aq": "@imfseries==\"IMF Staff Country Reports\"",  # Filtro estricto por la Serie
-        "numberOfResults": 100,  # Cantidad a traer (Suficiente para un mes)
+        "aq": "@imfseries==\"IMF Staff Country Reports\" OR @imftype==\"Article IV Staff Reports\"",  # Filtro estricto por la Serie
+        "numberOfResults": 150,  # Cantidad a traer (Suficiente para un mes)
         "sortCriteria": "@imfdate descending"  # Los más recientes primero
     }
 
     try:
+        print("📡 Solicitando Country Reports + Article IV a la API de Coveo...")
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         # Hacemos un POST directo a la base de datos de Coveo
-        res = requests.post(url, headers=headers, json=payload, timeout=15)
+        res = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+
 
         if res.status_code == 200:
             data = res.json()
+            print(f"✅ Respuesta recibida. Total en API: {data.get('totalCount', 0)} resultados")
 
             # 3. EXTRACCIÓN (Limpia y sin HTML)
             for item in data.get("results", []):
@@ -1500,24 +1893,41 @@ def load_country_reports_fmi(start_date_str, end_date_str):
 
                 # La fecha viene en timestamp (milisegundos). Lo dividimos entre 1000 para segundos.
                 raw_date = item.get("raw", {}).get("date")
-                parsed_date = None
-                if raw_date:
-                    try:
-                        parsed_date = datetime.datetime.fromtimestamp(
-                            raw_date / 1000.0)
-                    except:
-                        pass
 
-                if not titulo or not link or not parsed_date:
+                # 🚫 FILTRO: Saltar documentos "Coming Soon"
+                if "coming soon" in titulo.lower():
+                    print(f"   ⏭️ Country Reports - Excluido 'Coming Soon': {titulo[:60]}...")
+                    continue  # Salta este documento y pasa al siguiente
+
+                # Validación básica
+                if not titulo or not link or not raw_date:
                     continue
 
-                # Validamos contra la fecha del filtro de la app
-                if parsed_date >= start_date:
-                    if not any(r['Link'] == link for r in rows):
-                        rows.append(
-                            {"Date": parsed_date, "Title": titulo, "Link": link, "Organismo": "FMI"})
+                # Parsear fecha
+                try:
+                    parsed_date = datetime.datetime.fromtimestamp(raw_date / 1000.0)
+                except:
+                    continue
+
+                # ✅ FILTRO DE FECHAS MEJORADO (rango completo)
+                if parsed_date < start_date or parsed_date > end_date:
+                    continue
+
+                # Evitar duplicados
+                if not any(r['Link'] == link for r in rows):
+                    rows.append({
+                        "Date": parsed_date,
+                        "Title": titulo,
+                        "Link": link,
+                        "Organismo": "FMI"
+                    })
+                    
+            print(f"✅ Total de documentos filtrados: {len(rows)}")
+        else:
+            print(f"❌ Error en la API: {res.status_code}")
+
     except Exception as e:
-        pass
+        print(f"❌ Error en load_country_reports_fmi: {e}")
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -1529,66 +1939,72 @@ def load_country_reports_fmi(start_date_str, end_date_str):
 @st.cache_data(show_spinner=False)
 def load_press_releases_fmi(start_date_str, end_date_str):
     """Extractor FMI - Press Releases (Historial completo vía Coveo API)"""
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        print(f"📅 PRENSA - Rango de fechas: {start_date.date()} a {end_date_str}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
 
     rows = []
-
-    # 1. El Endpoint y la llave que tú mismo descubriste
     url = "https://imfproduction561s308u.org.coveo.com/rest/search/v2?organizationId=imfproduction561s308u"
-
-    # 2. Inyección de Headers para evadir el bloqueo CORS
+    
     headers = {
         "Authorization": "Bearer xx742a6c66-f427-4f5a-ae1e-770dc7264e8a",
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "Origin": "https://www.imf.org",   # <--- LA LLAVE PARA ENTRAR
-        "Referer": "https://www.imf.org/",  # <--- CONFIRMA QUE "VENIMOS" DEL FMI
+        "Origin": "https://www.imf.org",
+        "Referer": "https://www.imf.org/",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
-    # 3. Payload: Agregamos el filtro estricto de idioma
     payload = {
-        # Le pedimos PRs Y que el idioma sea inglés
         "aq": "@imftype==\"Press Release\" AND @syslanguage==\"English\"",
         "numberOfResults": 150,
         "sortCriteria": "@imfdate descending"
     }
 
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=15)
-
+        # 🔧 VERIFY=FALSE es la clave para evitar el error SSL
+        res = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+        
         if res.status_code == 200:
             data = res.json()
-
+            total_raw = data.get('totalCount', 0)
+            print(f"📡 PRENSA - Total resultados de la API: {total_raw}")
+            
             for item in data.get("results", []):
                 titulo = item.get("title", "")
                 link = item.get("clickUri", "")
-
-                # Coveo entrega la fecha en formato Unix (Milisegundos).
-                # ¡Es perfecto porque no falla la conversión!
                 raw_date = item.get("raw", {}).get("date")
+                
+                # 🚫 FILTRO: Saltar documentos "Coming Soon"
+                if "coming soon" in titulo.lower():
+                    print(f"   ⏭️ PRENSA - Excluido 'Coming Soon': {titulo[:60]}...")
+                    continue
+                
                 parsed_date = None
                 if raw_date:
                     try:
-                        # Convertimos de milisegundos a fecha normal
-                        parsed_date = datetime.datetime.fromtimestamp(
-                            raw_date / 1000.0)
+                        parsed_date = datetime.datetime.fromtimestamp(raw_date / 1000.0)
                     except:
                         pass
 
                 if not titulo or not link or not parsed_date:
                     continue
 
-                # Filtro final de fechas
                 if parsed_date >= start_date:
                     if not any(r['Link'] == link for r in rows):
-                        rows.append(
-                            {"Date": parsed_date, "Title": titulo, "Link": link, "Organismo": "FMI"})
+                        rows.append({"Date": parsed_date, "Title": titulo, "Link": link, "Organismo": "FMI"})
+                        print(f"   ✅ PRENSA - Agregado: {parsed_date.strftime('%Y-%m-%d')} - {titulo[:60]}...")
+            
+            print(f"📊 PRENSA - Total documentos filtrados: {len(rows)}")
+        else:
+            print(f"❌ PRENSA - Error en API: {res.status_code}")
     except Exception as e:
-        pass
+        print(f"❌ PRENSA - Excepción: {e}")
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -1835,7 +2251,7 @@ def load_pub_inst_fandd(start_date_str, end_date_str):
 
 @st.cache_data(show_spinner=False)
 def load_pub_inst_fmi(start_date_str, end_date_str):
-    """Extractor FMI - Vía directa por API Next.js (El Regalo)"""
+    """Extractor FMI - Vía directa por API Next.js (El Regalo) + filtro anti-Coming Soon"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'application/json, text/plain, */*'
@@ -1893,6 +2309,11 @@ def load_pub_inst_fmi(start_date_str, end_date_str):
                 link_raw = issue.get("url", {}).get(
                     "url", "") or issue.get("url", {}).get("path", "")
                 if not titulo or not link_raw:
+                    continue
+
+                # 🚫 FILTRO CRÍTICO: Excluir documentos "Coming Soon"
+                if "coming soon" in titulo.lower():
+                    print(f"   ⏭️ Excluido por 'Coming Soon': {titulo[:60]}...")
                     continue
 
                 link_real = link_raw if link_raw.startswith(
@@ -2011,17 +2432,18 @@ def load_pub_inst_bm(start_date_str, end_date_str):
     # --- SECCIÓN: INVESTIGACIÓN ---
 @st.cache_data(show_spinner=False)
 def load_working_papers_fmi(start_date_str, end_date_str):
-    """Extractor FMI - Working Papers (Conexión Directa Coveo API mediante @imfseries)"""
+    """Extractor FMI - Working Papers usando el filtro imfcontenttype=WRKNGPPRS"""
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
         end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 FMI Working Papers: {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
         end_date = datetime.datetime.now()
 
     rows = []
     url = "https://imfproduction561s308u.org.coveo.com/rest/search/v2?organizationId=imfproduction561s308u"
-
+    
     headers = {
         "Authorization": "Bearer xx742a6c66-f427-4f5a-ae1e-770dc7264e8a",
         "Content-Type": "application/json",
@@ -2031,52 +2453,81 @@ def load_working_papers_fmi(start_date_str, end_date_str):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
-    # Búsqueda exacta por la serie "IMF Working Papers"
+    # FILTRO CORRECTO: basado en el campo imfcontenttype con valor WRKNGPPRS
     payload = {
-        "aq": "@imfseries==\"IMF Working Papers\" AND @syslanguage==\"English\"",
+        "aq": "@imfcontenttype==\"WRKNGPPRS\" AND @syslanguage==\"English\"",
         "numberOfResults": 150,
         "sortCriteria": "@imfdate descending"
     }
 
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=15)
+        print("📡 Solicitando Working Papers a la API de Coveo...")
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        res = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
 
         if res.status_code == 200:
             data = res.json()
-
+            total_api = data.get('totalCount', 0)
+            print(f"✅ Total de Working Papers en la API: {total_api}")
+            
+            documentos_filtrados = 0
             for item in data.get("results", []):
                 titulo = item.get("title", "").strip()
                 link = item.get("clickUri", "")
-
-                # Extraer Fecha (De milisegundos Unix a Datetime normal)
+                
+                # Extraer fecha del timestamp
                 raw_date = item.get("raw", {}).get("date")
                 parsed_date = None
-                
                 if raw_date:
                     try:
                         parsed_date = datetime.datetime.fromtimestamp(raw_date / 1000.0)
                     except:
                         pass
-
+                
+                # También intentar con publicationDate si está disponible
+                if not parsed_date:
+                    pub_date = item.get("raw", {}).get("publicationDate")
+                    if pub_date:
+                        try:
+                            parsed_date = parser.parse(pub_date)
+                        except:
+                            pass
+                
                 if not titulo or not link or not parsed_date:
                     continue
-
-                # Filtrar por el rango de fechas de la app
+                
+                # Depuración: mostrar fechas encontradas
+                print(f"   📅 Encontrado: {parsed_date.strftime('%Y-%m-%d')} - {titulo[:60]}...")
+                
+                # Filtrar por el rango de fechas
                 if start_date <= parsed_date <= end_date:
                     if not any(r['Link'] == link for r in rows):
                         rows.append({
-                            "Date": parsed_date, 
-                            "Title": titulo, 
-                            "Link": link, 
+                            "Date": parsed_date,
+                            "Title": titulo,
+                            "Link": link,
                             "Organismo": "FMI"
                         })
+                        documentos_filtrados += 1
+                        print(f"      ✅ AGREGADO: {parsed_date.strftime('%Y-%m-%d')}")
+            
+            print(f"\n📊 Total de Working Papers en el rango {start_date.date()} a {end_date.date()}: {documentos_filtrados}")
+            
+        else:
+            print(f"❌ Error en la API: {res.status_code}")
+            
     except Exception as e:
-        pass # Silencioso para no romper la app principal
+        print(f"❌ Error en load_working_papers_fmi: {e}")
+        import traceback
+        traceback.print_exc()
 
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+    
     return df
 
 
@@ -2351,7 +2802,7 @@ def load_pub_inst_cemla(start_date_str, end_date_str):
 
     return df
 
-## INVESTIGACIÓN 
+# --- SECCIÓN: INVESTIGACIÓN --- 
 @st.cache_data(show_spinner=False)
 def load_investigacion_bpi(start_date_str, end_date_str):
     """Extractor Investigación BPI (BIS Papers & Working Papers) vía API JSON"""
@@ -2415,168 +2866,125 @@ def load_investigacion_bpi(start_date_str, end_date_str):
         
     return df
 
-
+## BID - Inglés 
 @st.cache_data(show_spinner=False)
 def load_investigacion_bid_en(start_date_str, end_date_str):
     """
-    Extrae Working Papers del BID en inglés de forma DINÁMICA
-    URL: https://publications.iadb.org/en?f%5B0%5D=type%3AWorking%20Papers
+    Extrae Working Papers del BID en inglés usando undetected-chromedriver
     """
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
+    import undetected_chromedriver as uc
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from bs4 import BeautifulSoup
     import datetime
-    import pandas as pd
     import time
     import re
-
+    import ssl
+    import urllib3
+    
+    # 🔧 SOLUCIÓN PARA REDES CORPORATIVAS
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    ssl._create_default_https_context = ssl._create_unverified_context
+    
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
         end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
-        print(f"📅 Rango de fechas BID Inglés: {start_date.date()} a {end_date.date()}")
+        print(f"📅 BID Inglés: {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
         end_date = datetime.datetime.now()
         print(f"⚠️ Error en fechas, usando rango por defecto")
-
+    
     rows = []
-    
-    # Configuración de paginación
     page = 0
-    max_pages = 5
-    hay_resultados = True
+    max_pages = 3
     
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--remote-debugging-port=9222")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
-
-    # Mapeo de meses en inglés
+    options = uc.ChromeOptions()
+    options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument('--disable-gpu')
+    
     meses_en = {
-        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-        'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
         'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
-        'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12
+        'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+        'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+        'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
     }
-
+    
     try:
-        print("🔍 Iniciando Selenium para BID Working Papers (EN)...")
-        driver = webdriver.Chrome(options=chrome_options)
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        print("🔍 Iniciando BID Inglés...")
+        driver = uc.Chrome(options=options, version_main=146)
+        time.sleep(2)
         
-        while page < max_pages and hay_resultados:
-            # URL para Working Papers en inglés
+        while page < max_pages:
             url = f"https://publications.iadb.org/en?f%5B0%5D=type%3AWorking%20Papers&page={page}"
+            print(f"📄 Página {page+1}: {url}")
             
-            print(f"📄 Accediendo a página {page+1}: {url}")
             driver.get(url)
-
+            time.sleep(10)
+            
+            if "Just a moment" in driver.page_source:
+                print("   ⚠️ Cloudflare detectado, esperando...")
+                time.sleep(15)
+            
             try:
-                WebDriverWait(driver, 20).until(
+                WebDriverWait(driver, 45).until(
                     EC.presence_of_element_located((By.CLASS_NAME, "views-row"))
                 )
-                print(f"✅ Página {page+1} cargada correctamente.")
-            except Exception as e:
-                print(f"⚠️ Timeout en página {page+1}: {e}")
-                time.sleep(5)
-
-            time.sleep(3)
-            html = driver.page_source
-            soup = BeautifulSoup(html, 'html.parser')
-
-            # Buscar TODOS los artículos
+            except:
+                pass
+            
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
             items = soup.find_all('div', class_='views-row')
-            print(f"📚 Página {page+1} - Artículos encontrados: {len(items)}")
-
-            if len(items) == 0:
-                print(f"📭 No hay más artículos en página {page+1}")
-                hay_resultados = False
+            
+            if not items:
+                print(f"   📭 No hay artículos en página {page+1}")
                 break
-
+            
+            print(f"   📚 Artículos: {len(items)}")
+            
             for item in items:
                 try:
-                    # ===== 1. BUSCAR EL TÍTULO =====
-                    title_elem = None
-                    
-                    # Buscar en la estructura típica del BID
                     title_container = item.find('div', class_='views-field-field-title')
                     if title_container:
-                        span_field = title_container.find('span', class_='field-content')
-                        if span_field:
-                            a_tag = span_field.find('a')
-                            if a_tag:
-                                title_elem = a_tag
-                    
-                    if not title_elem:
-                        # Fallback: buscar cualquier enlace con texto largo
-                        for a_tag in item.find_all('a', href=True):
-                            texto = a_tag.get_text(strip=True)
-                            if len(texto) > 30:
-                                title_elem = a_tag
-                                break
-                    
-                    if not title_elem:
+                        a_tag = title_container.find('a')
+                        if a_tag:
+                            titulo = a_tag.get_text(strip=True)
+                            link = a_tag.get('href', '')
+                            if link and not link.startswith('http'):
+                                link = "https://publications.iadb.org" + link
+                    else:
                         continue
-                    
-                    titulo = title_elem.get_text(strip=True)
-                    link = title_elem.get('href', '')
                     
                     if not titulo or len(titulo) < 10:
                         continue
                     
-                    if not link.startswith('http'):
-                        link = "https://publications.iadb.org" + link
-                    
-                    print(f"  📌 Título: {titulo[:80]}...")
-
-                    # ===== 2. BUSCAR LA FECHA =====
-                    parsed_date = None
-                    
-                    # Buscar fecha en la estructura típica
                     date_container = item.find('div', class_='views-field-field-date-issued-text')
                     if date_container:
-                        date_span = date_container.find('span', class_='field-content')
-                        if date_span:
-                            date_text = date_span.get_text(strip=True)
-                            print(f"  📅 Texto fecha: '{date_text}'")
-                            
-                            # Procesar fecha en formato "Mar 2026" o "March 2026"
-                            match = re.search(r'([A-Za-z]+)\s+(\d{4})', date_text)
-                            if match:
-                                mes_str = match.group(1).lower()
-                                año = int(match.group(2))
-                                
-                                # Convertir mes a número
-                                mes_num = None
-                                for key, value in meses_en.items():
-                                    if mes_str in key or key in mes_str:
-                                        mes_num = value
-                                        break
-                                
-                                if mes_num:
-                                    parsed_date = datetime.datetime(año, mes_num, 1)
-                                    print(f"  ✅ Fecha parseada: {parsed_date.strftime('%Y-%m')}")
-                    
-                    if not parsed_date:
-                        print(f"  ⚠️ No se pudo extraer fecha")
+                        date_text = date_container.get_text(strip=True)
+                        match = re.search(r'([A-Za-z]+)\s+(\d{4})', date_text)
+                        if match:
+                            mes_str = match.group(1).lower()
+                            año = int(match.group(2))
+                            mes_num = meses_en.get(mes_str, 1)
+                            parsed_date = datetime.datetime(año, mes_num, 1)
+                        else:
+                            continue
+                    else:
                         continue
                     
-                    # ===== 3. FILTRAR POR FECHA =====
-                    if parsed_date < start_date or parsed_date > end_date:
-                        print(f"  ⏭️ Fecha fuera de rango: {parsed_date.date()}")
+                    # Filtrar por año y mes
+                    if parsed_date.year < start_date.year or parsed_date.year > end_date.year:
+                        continue
+                    if parsed_date.year == start_date.year and parsed_date.month < start_date.month:
+                        continue
+                    if parsed_date.year == end_date.year and parsed_date.month > end_date.month:
                         continue
                     
-                    # ===== 4. GUARDAR =====
                     if not any(r['Link'] == link for r in rows):
                         rows.append({
                             "Date": parsed_date,
@@ -2584,91 +2992,196 @@ def load_investigacion_bid_en(start_date_str, end_date_str):
                             "Link": link,
                             "Organismo": "BID (Inglés)"
                         })
-                        print(f"  ✅ Artículo AGREGADO")
-                    
+                        print(f"   ✅ {parsed_date.strftime('%Y-%m')}: {titulo[:50]}...")
+                        
                 except Exception as e:
-                    print(f"  ❌ Error procesando artículo: {e}")
+                    print(f"   ⚠️ Error procesando artículo: {e}")
                     continue
-
+            
             page += 1
-            print(f"➡️ Avanzando a página {page+1}...\n")
-            time.sleep(2)
-
+            time.sleep(3)
+        
         driver.quit()
-
+        
     except Exception as e:
-        print(f"❌ Error general: {e}")
+        print(f"❌ Error en BID Inglés: {e}")
         import traceback
         traceback.print_exc()
-
+    
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.drop_duplicates(subset=['Link'])
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
-        print(f"\n✅ Documentos BID (EN) encontrados: {len(df)}")
+        print(f"\n✅ BID Inglés: {len(df)} documentos")
     else:
-        print("\n⚠️ No se encontraron documentos del BID (EN)")
-
+        print("\n⚠️ No se encontraron documentos del BID (Inglés)")
+    
     return df
+
+## BID ESPAÑOL 
 
 @st.cache_data(show_spinner=False)
 def load_investigacion_bid(start_date_str, end_date_str):
-    """
-    Versión simplificada con datos de ejemplo para BID español
-    """
+    import undetected_chromedriver as uc
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from bs4 import BeautifulSoup
+    import datetime
+    import time
+    import re
+    import ssl
+    import urllib3
+    
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    ssl._create_default_https_context = ssl._create_unverified_context
+    
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
         end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 BID Español: {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
         end_date = datetime.datetime.now()
     
-    print(f"📅 BID Español (datos de ejemplo): {start_date.date()} a {end_date.date()}")
+    rows = []
+    page = 0
+    max_pages = 3
     
-    # Base de datos de artículos reales del BID
-    articulos_reales = [
-        # Marzo 2026
-        {
-            "Date": datetime.datetime(2026, 3, 15),
-            "Title": "Choques de confianza y precios de minerales: evidencia sobre la inversión minera y no minera en el Perú",
-            "Link": "https://publications.iadb.org/es/choques-de-confianza-y-precios-de-minerales-evidencia-sobre-la-inversion-minera-y-no-minera-en-el"
-        },
-        # Febrero 2026
-        {
-            "Date": datetime.datetime(2026, 2, 24),
-            "Title": "Desafíos y oportunidades para la inclusión laboral de las mujeres en el sector turístico de Ecuador",
-            "Link": "https://publications.iadb.org/es/desafios-y-oportunidades-para-la-inclusion-laboral-de-las-mujeres-en-el-sector-turistico-de-ecuador"
-        },
-        # Enero 2026
-        {
-            "Date": datetime.datetime(2026, 1, 20),
-            "Title": "Aprendizaje móvil de lenguas indígenas: evidencia experimental de una intervención escolar en Perú",
-            "Link": "https://publications.iadb.org/es/aprendizaje-movil-de-lenguas-indigenas-evidencia-experimental-de-una-intervencion-escolar-en-peru"
-        }
-    ]
+    options = uc.ChromeOptions()
+    options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument('--disable-gpu')
     
-    # Filtrar por rango de fechas
-    df = pd.DataFrame(articulos_reales)
-    df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
-    df["Organismo"] = "BID"
+    meses_es = {
+        'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
+        'julio': 7, 'agosto': 8, 'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12,
+    }
     
+    try:
+        print("🔍 Iniciando BID Español...")
+        driver = uc.Chrome(options=options, version_main=146)
+        time.sleep(2)
+        
+        while page < max_pages:
+            url = f"https://publications.iadb.org/es?f%5B0%5D=type%3A4633&f%5B1%5D=type%3ADocumentos%20de%20Trabajo&page={page}"
+            print(f"📄 Página {page+1}: {url}")
+            
+            driver.get(url)
+            time.sleep(10)
+            
+            if "Just a moment" in driver.page_source:
+                print("   ⚠️ Cloudflare detectado, esperando...")
+                time.sleep(15)
+            
+            try:
+                WebDriverWait(driver, 45).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "views-row"))
+                )
+            except:
+                pass
+            
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            items = soup.find_all('div', class_='views-row')
+            
+            if not items:
+                print(f"   📭 No hay artículos en página {page+1}")
+                break
+            
+            print(f"   📚 Artículos: {len(items)}")
+            
+            for item in items:
+                try:
+                    title_container = item.find('div', class_='views-field-field-title')
+                    if title_container:
+                        a_tag = title_container.find('a')
+                        if a_tag:
+                            titulo = a_tag.get_text(strip=True)
+                            link = a_tag.get('href', '')
+                            if link and not link.startswith('http'):
+                                link = "https://publications.iadb.org" + link
+                    else:
+                        continue
+                    
+                    if not titulo or len(titulo) < 10:
+                        continue
+                    
+                    date_container = item.find('div', class_='views-field-field-date-issued-text')
+                    if date_container:
+                        date_text = date_container.get_text(strip=True)
+                        match = re.search(r'([A-Za-z]+)\s+(\d{4})', date_text)
+                        if match:
+                            mes_str = match.group(1).lower()
+                            año = int(match.group(2))
+                            mes_num = meses_es.get(mes_str, 1)
+                            parsed_date = datetime.datetime(año, mes_num, 1)
+                        else:
+                            continue
+                    else:
+                        continue
+                    
+                    if parsed_date.year < start_date.year or parsed_date.year > end_date.year:
+                        continue
+                    if parsed_date.year == start_date.year and parsed_date.month < start_date.month:
+                        continue
+                    if parsed_date.year == end_date.year and parsed_date.month > end_date.month:
+                        continue
+                    
+                    if not any(r['Link'] == link for r in rows):
+                        rows.append({
+                            "Date": parsed_date,
+                            "Title": titulo,
+                            "Link": link,
+                            "Organismo": "BID"
+                        })
+                        print(f"   ✅ {parsed_date.strftime('%Y-%m')}: {titulo[:50]}...")
+                        
+                except Exception as e:
+                    continue
+            
+            page += 1
+            time.sleep(3)
+        
+        driver.quit()
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+    
+    df = pd.DataFrame(rows)
     if not df.empty:
-        print(f"  ✅ {len(df)} artículos del BID (ES) encontrados")
-    else:
-        print(f"  ⚠️ No hay artículos en el rango seleccionado")
+        df = df.drop_duplicates(subset=['Link'])
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date", ascending=False)
+        print(f"\n✅ BID Español: {len(df)} documentos")
     
     return df
 
+# ========== INVESTIGACIÓN CEMLA (Latin American Journal of Central Banking) ==========
+@st.cache_data(show_spinner=False)
+def load_investigacion_cemla(start_date_str, end_date_str):
+    """
+    Extractor CEMLA - Actualmente bloqueado por ScienceDirect.
+    Retorna DataFrame vacío sin errores.
+    """
+    print("⚠️ CEMLA Investigación: ScienceDirect bloquea el acceso. No se pueden extraer artículos.")
+    return pd.DataFrame()
+
 @st.cache_data(show_spinner=False)
 def load_investigacion_fmi(start_date_str, end_date_str):
-    """Extractor FMI - Blogs de Investigación (Vía Coveo API con llave exacta, SOLO TÍTULO)"""
+    """Extractor FMI - Blogs de Investigación (Vía Coveo API) - Versión mejorada"""
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
         end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
-    except:
+        print(f"📅 FMI Blogs - Rango solicitado: {start_date.date()} a {end_date.date()}")
+    except Exception as e:
+        print(f"⚠️ Error en fechas: {e}")
         start_date = datetime.datetime(2000, 1, 1)
         end_date = datetime.datetime.now()
+        print(f"📅 Usando rango por defecto: {start_date.date()} a {end_date.date()}")
 
     rows = []
     url = "https://imfproduction561s308u.org.coveo.com/rest/search/v2?organizationId=imfproduction561s308u"
@@ -2682,53 +3195,96 @@ def load_investigacion_fmi(start_date_str, end_date_str):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
-    # LA LLAVE MAESTRA DESCUBIERTA: IMF Blog Page
     payload = {
         "aq": "@imftype==\"IMF Blog Page\" AND @syslanguage==\"English\"",
-        "numberOfResults": 150,
+        "numberOfResults": 250,  # Aumentado para capturar más
         "sortCriteria": "@imfdate descending"
     }
 
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=15)
+        print("📡 Solicitando blogs a la API de Coveo...")
+        res = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+        
         if res.status_code == 200:
             data = res.json()
+            total_api = data.get('totalCount', 0)
+            print(f"✅ Total de blogs en la API: {total_api}")
+            
+            documentos_filtrados = 0
             for item in data.get("results", []):
-                # Extraemos el título y lo limpiamos de comillas o espacios sobrantes
-                titulo_limpio = item.get("title", "").strip().strip('"').strip("'").strip()
+                titulo = item.get("title", "").strip()
                 link = item.get("clickUri", "")
                 
-                # Extraemos la fecha matemática de Coveo
-                raw_data = item.get("raw", {})
-                raw_date = raw_data.get("date")
-
+                # === MEJORA: Extraer fecha de múltiples formatos ===
                 parsed_date = None
+                raw_data = item.get("raw", {})
+                
+                # Formato 1: timestamp en milisegundos (el más común)
+                raw_date = raw_data.get("date")
                 if raw_date:
                     try:
                         parsed_date = datetime.datetime.fromtimestamp(raw_date / 1000.0)
                     except:
                         pass
                 
-                # Si falta el título, el enlace o la fecha, descartamos el elemento
-                if not titulo_limpio or not link or not parsed_date:
+                # Formato 2: fecha como string ISO
+                if not parsed_date:
+                    date_str = raw_data.get("date") or raw_data.get("publisheddate") or raw_data.get("publicationdate")
+                    if date_str and isinstance(date_str, str):
+                        try:
+                            parsed_date = parser.parse(date_str)
+                        except:
+                            pass
+                
+                # Formato 3: intentar con cualquier campo que parezca fecha
+                if not parsed_date:
+                    for key in ['date', 'publisheddate', 'publicationdate', 'createddate', 'lastmodified']:
+                        val = raw_data.get(key)
+                        if val:
+                            try:
+                                if isinstance(val, (int, float)):
+                                    parsed_date = datetime.datetime.fromtimestamp(val / 1000.0)
+                                elif isinstance(val, str):
+                                    parsed_date = parser.parse(val)
+                                if parsed_date:
+                                    break
+                            except:
+                                continue
+                
+                if not titulo or not link or not parsed_date:
                     continue
-
-                # Filtrar por fechas
+                
+                # Depuración: mostrar las fechas que se están procesando
+                print(f"   📅 Procesando: {parsed_date.strftime('%Y-%m-%d')} - {titulo[:50]}...")
+                
+                # Filtrar por el rango de fechas
                 if start_date <= parsed_date <= end_date:
                     if not any(r['Link'] == link for r in rows):
                         rows.append({
                             "Date": parsed_date, 
-                            "Title": titulo_limpio, # <--- Se envía el título crudo sin autor
+                            "Title": titulo, 
                             "Link": link, 
                             "Organismo": "FMI"
                         })
+                        documentos_filtrados += 1
+                        print(f"      ✅ AGREGADO: {parsed_date.strftime('%Y-%m-%d')}")
+            
+            print(f"\n📊 Total de blogs en el rango {start_date.date()} a {end_date.date()}: {documentos_filtrados}")
+            
+        else:
+            print(f"❌ Error en la API: {res.status_code}")
+            
     except Exception as e:
-        pass # Silencioso para no romper la aplicación
+        print(f"❌ Error en load_investigacion_fmi: {e}")
+        import traceback
+        traceback.print_exc()
 
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+    
     return df
 
 @st.cache_data(show_spinner=False)
@@ -2828,10 +3384,174 @@ def load_investigacion_bm(start_date_str, end_date_str):
             df["Date"] = df["Date"].dt.tz_convert(None)
         df = df.sort_values("Date", ascending=False)
     return df
+
+## OCDE - INVESTIGACION
+
+@st.cache_data(show_spinner=False)
+def load_investigacion_ocde(start_date_str, end_date_str):
+    """Extractor OCDE - Working Papers (API oficial con paginación)"""
+    import requests
+    import datetime
+    import re
+    from dateutil import parser
+    
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 OCDE Investigación: {start_date.date()} a {end_date.date()}")
+    except:
+        start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+    
+    rows = []
+    
+    # API base de la OCDE
+    base_url = "https://api.oecd.org/webcms/search/faceted-search"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+    }
+    
+    page = 0
+    page_size = 50  # Número de resultados por página
+    max_pages = 10  # Límite de seguridad (500 documentos máximo)
+    documentos_procesados = 0
+    
+    print("📡 Solicitando Working Papers a la API de la OCDE (con paginación)...")
+    
+    try:
+        while page < max_pages:
+            params = {
+                "siteName": "oecd",
+                "interfaceLanguage": "en",
+                "orderBy": "mostRecent",
+                "pageSize": page_size,
+                "page": page,
+                "facets": "oecd-languages:en",
+                "hiddenFacets": "oecd-content-types:publications/working-papers"
+            }
+            
+            print(f"   📄 Procesando página {page + 1}...")
+            response = requests.get(base_url, params=params, headers=headers, timeout=15)
+            
+            if response.status_code != 200:
+                print(f"   ❌ Error en página {page + 1}: {response.status_code}")
+                break
+            
+            data = response.json()
+            
+            # Buscar los resultados
+            results = []
+            if "results" in data:
+                results = data["results"]
+            else:
+                print(f"   ⚠️ Estructura inesperada en página {page + 1}")
+                break
+            
+            if not results:
+                print(f"   📭 No hay más resultados en página {page + 1}")
+                break
+            
+            # Contar cuántos documentos del mes encontramos en esta página
+            documentos_en_pagina = 0
+            fecha_mas_reciente = None
+            fecha_mas_antigua = None
+            
+            for item in results:
+                titulo = item.get("title", "") or item.get("name", "")
+                link = item.get("url", "") or item.get("link", "")
+                
+                if not titulo or not link:
+                    continue
+                
+                # Extraer fecha del campo publicationDateTime
+                fecha_texto = item.get("publicationDateTime", "")
+                
+                parsed_date = None
+                if fecha_texto:
+                    try:
+                        parsed_date = parser.parse(fecha_texto)
+                        if parsed_date.tzinfo is not None:
+                            parsed_date = parsed_date.replace(tzinfo=None)
+                    except:
+                        continue
+                
+                if not parsed_date:
+                    continue
+                
+                # Actualizar fechas extremas
+                if fecha_mas_reciente is None or parsed_date > fecha_mas_reciente:
+                    fecha_mas_reciente = parsed_date
+                if fecha_mas_antigua is None or parsed_date < fecha_mas_antigua:
+                    fecha_mas_antigua = parsed_date
+                
+                # Si el documento es más antiguo que start_date, podemos parar porque
+                # los resultados están ordenados por fecha descendente
+                if parsed_date < start_date:
+                    # Ya no hay más documentos del mes en esta página ni en las siguientes
+                    print(f"   ⏹️ Documento más antiguo que {start_date.strftime('%Y-%m')}, deteniendo paginación")
+                    # Salimos del while principal
+                    page = max_pages
+                    break
+                
+                # Filtrar por rango de fechas
+                if parsed_date >= start_date and parsed_date <= end_date:
+                    # Limpiar título
+                    titulo = re.sub(r'\s+', ' ', titulo).strip()
+                    
+                    # Asegurar URL absoluta
+                    if link.startswith('/'):
+                        link = f"https://www.oecd.org{link}"
+                    
+                    rows.append({
+                        "Date": parsed_date,
+                        "Title": titulo,
+                        "Link": link,
+                        "Organismo": "OCDE"
+                    })
+                    documentos_en_pagina += 1
+                    documentos_procesados += 1
+            
+            print(f"   📊 Página {page + 1}: {documentos_en_pagina} documentos en el rango")
+            
+            # Si no encontramos documentos en esta página y ya pasamos la fecha límite, paramos
+            if documentos_en_pagina == 0 and fecha_mas_antigua and fecha_mas_antigua < start_date:
+                print(f"   ⏹️ Fin de resultados para el mes solicitado")
+                break
+            
+            # Si encontramos menos de page_size documentos, probablemente es la última página
+            if len(results) < page_size:
+                print(f"   📭 Última página alcanzada")
+                break
+            
+            page += 1
+            # Pequeña pausa para no sobrecargar la API
+            time.sleep(0.3)
+        
+        print(f"\n📊 Total documentos OCDE encontrados: {documentos_procesados}")
+        
+    except Exception as e:
+        print(f"❌ Error en load_investigacion_ocde: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+    
+    print(f"📊 OCDE Investigación - Total final: {len(df)}")
+    return df
+
+
 # --- SECCIÓN: DISCURSOS ---
+
+## -- Banco de Inglaterra -- Bank of England (BoE)
 @st.cache_data(show_spinner=False)
 def load_discursos_boe(start_date_str, end_date_str):
-    """Extractor Automático BoE - Vía RSS"""
+    """Extractor Automático BoE - Vía RSS con formato consistente 'Autor: Título'"""
     import requests
     from bs4 import BeautifulSoup
     import pandas as pd
@@ -2850,6 +3570,42 @@ def load_discursos_boe(start_date_str, end_date_str):
     headers = {'User-Agent': 'Mozilla/5.0'}
     rows = []
 
+    def extract_author_from_title(title):
+        """Extrae el nombre del autor del título en varios formatos"""
+        autor = ""
+        titulo_limpio = title
+        
+        # Patrón 1: "Título − speech by Autor" (con guión largo o corto)
+        match = re.search(r'(?i)\s*[\-–—]\s*speech\s+by\s+(.+?)$', title)
+        if match:
+            autor = clean_author_name(match.group(1).strip())
+            # Eliminar TODO desde el guión hasta el final
+            titulo_limpio = re.sub(r'(?i)\s*[\-–—]\s*speech\s+by\s+.*$', '', title).strip()
+            return autor, titulo_limpio
+        
+        # Patrón 2: "Speech by Autor: Título" o "Speech by Autor - Título"
+        match = re.search(r'(?i)^speech\s+by\s+([^:—-]+)[:—-]\s*(.+)$', title)
+        if match:
+            autor = clean_author_name(match.group(1).strip())
+            titulo_limpio = match.group(2).strip()
+            return autor, titulo_limpio
+        
+        # Patrón 3: "Autor: Título" (ya está bien formateado)
+        match = re.search(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*:\s*(.+)$', title)
+        if match:
+            autor = clean_author_name(match.group(1))
+            titulo_limpio = match.group(2)
+            return autor, titulo_limpio
+        
+        # Patrón 4: "Título by Autor" (sin "speech")
+        match = re.search(r'(?i)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)$', title)
+        if match:
+            autor = clean_author_name(match.group(1))
+            titulo_limpio = re.sub(r'(?i)\s+by\s+.*$', '', title).strip()
+            return autor, titulo_limpio
+        
+        return None, title
+
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
@@ -2861,7 +3617,8 @@ def load_discursos_boe(start_date_str, end_date_str):
                 link = item.find("link").text if item.find("link") else ""
                 fecha_raw = item.find("pubDate").text if item.find("pubDate") else ""
 
-                if not titulo_raw or not link or not fecha_raw: continue
+                if not titulo_raw or not link or not fecha_raw:
+                    continue
 
                 try:
                     parsed_date = parser.parse(fecha_raw)
@@ -2871,15 +3628,27 @@ def load_discursos_boe(start_date_str, end_date_str):
                     continue
 
                 if start_date <= parsed_date <= end_date:
-                    autor = ""
-                    titulo_limpio = titulo_raw
-                    match_autor = re.search(r'(?i)\s*[\-–—]\s*speech\s+by\s+(.*)$', titulo_raw)
-                    if match_autor:
-                        autor = clean_author_name(match_autor.group(1).strip())
-                        titulo_limpio = re.sub(r'(?i)\s*[\-–—]\s*speech\s+by\s+.*$', '', titulo_raw).strip()
-
-                    titulo_final = f"{autor}: {titulo_limpio}" if autor else titulo_limpio
-
+                    # Extraer autor y título limpio
+                    autor, titulo_limpio = extract_author_from_title(titulo_raw)
+                    
+                    # LIMPIEZA DIRECTA: eliminar específicamente " − speech" o " −" al final
+                    # Primero, eliminar " − speech" (con el guión especial)
+                    titulo_limpio = titulo_limpio.replace(' − speech', '').replace(' - speech', '').replace('— speech', '')
+                    # Luego, eliminar " −" solitario al final
+                    titulo_limpio = titulo_limpio.replace(' −', '').replace(' -', '').replace('—', '')
+                    # Eliminar espacios sobrantes al final
+                    titulo_limpio = titulo_limpio.rstrip()
+                    
+                    # Construir título final en formato "Autor: Título"
+                    if autor:
+                        titulo_final = f"{autor}: {titulo_limpio}"
+                    else:
+                        titulo_final = titulo_limpio
+                    
+                    # Limpieza final de espacios múltiples
+                    titulo_final = re.sub(r'\s+', ' ', titulo_final).strip()
+                    titulo_final = titulo_final.strip('"').strip("'").strip()
+                    
                     if not any(r['Link'] == link for r in rows):
                         rows.append({
                             "Date": parsed_date,
@@ -2888,13 +3657,15 @@ def load_discursos_boe(start_date_str, end_date_str):
                             "Organismo": "BoE (Inglaterra)"
                         })
     except Exception as e:
-        pass
+        print(f"Error en load_discursos_boe: {e}")
 
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values(by="Date", ascending=False)
     return df
+
+## -- FMI - Discursos 
 
 @st.cache_data(show_spinner=False)
 def load_discursos_fmi(start_date_str, end_date_str):
@@ -3345,54 +4116,277 @@ def load_data_fed(anios_num):
         df = df.sort_values("Date", ascending=False)
     return df
 
-
+## Banco de Francia - BDF - Discursos 
 @st.cache_data(show_spinner=False)
 def load_data_bdf(start_date_str, end_date_str):
-    base_url = "https://www.banque-france.fr/en/governor-interventions"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    """Extractor Banco de Francia (BdF) - Discursos del Gobernador (Versión Selenium)"""
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from bs4 import BeautifulSoup
+    import datetime
+    import time
+    import re
+    from dateutil import parser
+    
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 BdF (Francia) - Selenium: {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
-    rows, page = [], 0
-    while True:
-        try:
-            response = requests.get(base_url, headers=headers, params={
-                                    'category[7052]': '7052', 'page': page}, timeout=12)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            cards = soup.find_all('div', class_=lambda c: c and 'card' in c)
-            if not cards:
-                break
-            items_found = 0
-            for card in cards:
-                a = card.find('a', href=True)
-                if not a or not a.find('span', class_='title-truncation'):
+        end_date = datetime.datetime.now()
+        print(f"⚠️ Error en fechas, usando rango por defecto")
+    
+    rows = []
+    
+    # URL principal con el filtro de discursos del Gobernador
+    url = "https://www.banque-france.fr/en/governor-interventions?category%5B7052%5D=7052"
+    
+    # Configuración de Selenium
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    try:
+        print(f"📡 Iniciando Selenium para BdF...")
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        print(f"   Navegando a: {url}")
+        driver.get(url)
+        
+        # Esperar a que cargue el contenido principal
+        time.sleep(5)
+        
+        # Scroll para activar lazy loading si existe
+        driver.execute_script("window.scrollTo(0, 1000);")
+        time.sleep(2)
+        driver.execute_script("window.scrollTo(0, 2000);")
+        time.sleep(2)
+        
+        # Extraer el HTML ya renderizado
+        html = driver.page_source
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Buscar los cards de discursos
+        cards = soup.find_all('div', class_=lambda c: c and 'card' in c if c else False)
+        
+        # Si no encuentra cards, buscar directamente con selectores más específicos
+        if not cards:
+            cards = soup.find_all('div', class_='card')
+        
+        print(f"   📚 Cards encontrados: {len(cards)}")
+        
+        # Si aún no hay cards, buscar artículos
+        if not cards:
+            cards = soup.find_all('article')
+            print(f"   📚 Artículos encontrados: {len(cards)}")
+        
+        # Mapeo de meses en inglés para fechas como "2nd of April 2026"
+        meses_map = {
+            'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+            'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+        }
+        
+        items_found = 0
+        for card in cards:
+            try:
+                # === 1. EXTRAER TÍTULO Y ENLACE ===
+                title_elem = None
+                link = None
+                
+                # Buscar h3 con clase card__title o similar
+                title_h3 = card.find('h3', class_=lambda c: c and 'card__title' in c if c else False)
+                if not title_h3:
+                    title_h3 = card.find('h3')
+                
+                if title_h3:
+                    a_tag = title_h3.find('a')
+                    if a_tag:
+                        title_elem = a_tag
+                        link = a_tag.get('href', '')
+                
+                if not title_elem:
+                    # Buscar cualquier enlace con texto largo
+                    for a in card.find_all('a', href=True):
+                        texto = a.get_text(strip=True)
+                        if len(texto) > 20:
+                            title_elem = a
+                            link = a.get('href', '')
+                            break
+                
+                if not title_elem or not link:
                     continue
-                titulo_raw, link = a.find('span', class_='title-truncation').get_text(
-                    strip=True), "https://www.banque-france.fr" + a['href']
-                date_s = card.find('small')
-                if not date_s:
+                
+                titulo = title_elem.get_text(strip=True)
+                
+                # Limpiar título (eliminar saltos de línea y espacios extra)
+                titulo = re.sub(r'\s+', ' ', titulo).strip()
+                
+                # === NUEVO: Eliminar comillas tipográficas del título original ===
+                # Eliminar comillas dobles inglesas y españolas (apertura y cierre)
+                titulo = titulo.replace('“', '').replace('”', '').replace('"', '').replace('«', '').replace('»', '')
+                # Eliminar comillas simples si existen
+                titulo = titulo.replace("'", "")
+
+                # Construir URL absoluta
+                if link.startswith('/'):
+                    link = "https://www.banque-france.fr" + link
+                
+                # === 2. EXTRAER FECHA ===
+                date_elem = None
+                date_text = None
+                
+                # Buscar div con clase card__date
+                date_div = card.find('div', class_=lambda c: c and 'card__date' in c if c else False)
+                if date_div:
+                    date_text = date_div.get_text(strip=True)
+                else:
+                    # Buscar cualquier elemento con clase que contenga 'date'
+                    date_elem = card.find(class_=re.compile(r'date', re.I))
+                    if date_elem:
+                        date_text = date_elem.get_text(strip=True)
+                
+                if not date_text:
+                    # Buscar en el texto del card
+                    card_text = card.get_text()
+                    date_match = re.search(r'(\d{1,2}(?:st|nd|rd|th)?\s+of\s+[A-Za-z]+\s+\d{4})', card_text, re.IGNORECASE)
+                    if date_match:
+                        date_text = date_match.group(1)
+                
+                if not date_text:
                     continue
-                fecha_clean = re.sub(
-                    r'(\d+)(st|nd|rd|th)\s+of\s+', r'\1 ', date_s.get_text(strip=True))
+                
+                # Limpiar fecha: eliminar "st", "nd", "rd", "th" y "of"
+                date_text = re.sub(r'(\d+)(st|nd|rd|th)\s+of\s+', r'\1 ', date_text, flags=re.IGNORECASE)
+                date_text = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', date_text)
+                date_text = date_text.strip()
+                
+                # Parsear fecha
+                parsed_date = None
                 try:
-                    parsed_date = parser.parse(fecha_clean)
+                    # Intentar parsear formatos como "2 April 2026" o "April 2, 2026"
+                    parsed_date = parser.parse(date_text)
+                    if parsed_date.tzinfo is not None:
+                        parsed_date = parsed_date.replace(tzinfo=None)
                 except:
+                    # Fallback: extraer manualmente
+                    match = re.search(r'(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})', date_text, re.IGNORECASE)
+                    if not match:
+                        match = re.search(r'([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})', date_text, re.IGNORECASE)
+                    
+                    if match:
+                        groups = match.groups()
+                        if len(groups) == 3:
+                            # Determinar si el primer grupo es día o mes
+                            if groups[0].isdigit():
+                                dia = int(groups[0])
+                                mes_str = groups[1].lower()
+                                año = int(groups[2])
+                            else:
+                                mes_str = groups[0].lower()
+                                dia = int(groups[1])
+                                año = int(groups[2])
+                            
+                            mes_num = meses_map.get(mes_str, 1)
+                            try:
+                                parsed_date = datetime.datetime(año, mes_num, min(dia, 28))
+                            except:
+                                parsed_date = datetime.datetime(año, mes_num, 1)
+                
+                if not parsed_date:
                     continue
+                
+                # === 3. FILTRAR POR FECHA ===
+                if parsed_date < start_date or parsed_date > end_date:
+                    continue
+                
+                # === 4. VERIFICAR DUPLICADOS ===
                 if not any(r['Link'] == link for r in rows):
-                    rows.append({"Date": parsed_date, "Title": titulo_raw,
-                                "Link": link, "Organismo": "BdF (Francia)"})
+                    # === NUEVO: Extraer autor desde la página del discurso ===
+                    autor = None
+                    # Solo intentar si el título no tiene ya formato "Nombre:"
+                    if not re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+:', titulo):
+                        try:
+                            headers_page = {'User-Agent': 'Mozilla/5.0'}
+                            page_response = requests.get(link, headers=headers_page, timeout=10)
+                            if page_response.status_code == 200:
+                                soup_page = BeautifulSoup(page_response.text, 'html.parser')
+                                page_text = soup_page.get_text()
+                                
+                                # === CÓDIGO CORREGIDO ===
+                                # Incluir letras acentuadas y cedilla: A-Za-zÀ-ÿç
+                                match = re.search(r'Speech by ([A-Za-zÀ-ÿç\s]+?)(?:\s+Governor|\s+of|\s*$)', page_text)
+                                if not match:
+                                    # Fallback: capturar primeras palabras después de "Speech by"
+                                    match = re.search(r'Speech by ([A-ZÀ-ÿ][a-zÀ-ÿç]+(?:\s+[A-Za-zÀ-ÿç]+)?(?:\s+[a-zÀ-ÿç]+)?(?:\s+[A-Za-zÀ-ÿç]+)?)', page_text)
+                                
+                                if match:
+                                    autor = match.group(1).strip()
+                                    # Limpiar espacios extra
+                                    autor = re.sub(r'\s+', ' ', autor)
+                                    print(f"      📝 Autor encontrado: {autor}")
+                        except:
+                            pass
+                    
+                    if autor:
+                        # Limpiar título: eliminar comillas y espacios extra
+                        titulo_limpio = titulo.strip()
+                        # Eliminar comillas dobles inglesas y españolas (apertura y cierre)
+                        for char in ['"', "'", '“', '”', '«', '»']:
+                            if titulo_limpio.startswith(char) and titulo_limpio.endswith(char):
+                                titulo_limpio = titulo_limpio[1:-1]
+                                break
+                        
+                        # Verificar si el autor ya está al inicio del título (evitar duplicados)
+                        if titulo_limpio.lower().startswith(autor.lower()):
+                            titulo_final = titulo_limpio  # No añadir autor duplicado
+                        else:
+                            titulo_final = f"{autor}: {titulo_limpio}"
+                    else:
+                        titulo_final = titulo
+                    
+                    rows.append({
+                        "Date": parsed_date,
+                        "Title": titulo_final,
+                        "Link": link,
+                        "Organismo": "BdF (Francia)"
+                    })
                     items_found += 1
-            if items_found == 0 or (rows and rows[-1]['Date'] < start_date):
-                break
-            page += 1
-            time.sleep(0.3)
-        except:
-            break
+                    print(f"   ✅ {parsed_date.strftime('%Y-%m-%d')}: {titulo_final[:60]}...")
+                    items_found += 1
+                
+            except Exception as e:
+                print(f"   ⚠️ Error procesando card: {e}")
+                continue
+        
+        print(f"   📊 Documentos encontrados en BdF: {items_found}")
+        driver.quit()
+        
+    except Exception as e:
+        print(f"❌ Error en load_data_bdf: {e}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame()
+    
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+    
+    print(f"📊 BdF (Francia) - Total final: {len(df)}")
     return df
 
 
@@ -3443,62 +4437,256 @@ def load_data_bm(start_date_str, end_date_str):
         df = df.sort_values("Date", ascending=False)
     return df
 
-
+## Banco de Canadá - Discrusos - boc
 @st.cache_data(show_spinner=False)
 def load_data_boc(start_date_str, end_date_str):
-    base_url = "https://www.bankofcanada.ca/press/speeches/"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    """Extractor Banco de Canadá (BoC) - Versión estable mejorada"""
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from bs4 import BeautifulSoup
+    import datetime
+    import time
+    import re
+    from dateutil import parser
+    import requests
+
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 BoC (Canadá): {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
-    rows, page = [], 1
+        end_date = datetime.datetime.now()
+        print(f"⚠️ Error en fechas, usando rango por defecto")
+    
+    rows = []
+    page = 1
+    
+    def limpiar_titulo(titulo):
+        """Limpia el título de texto basura"""
+        titulo = re.sub(r'(?i)^Speech\s*[:\-]\s*', '', titulo)
+        titulo = re.sub(r'(?i)^Remarks\s*[:\-]\s*', '', titulo)
+        titulo = re.sub(r'(?i)^Opening\s+statement\s*[:\-]\s*', '', titulo)
+        titulo = re.sub(r'(?i)^Fireside\s+chat\s*[:\-]\s*', '', titulo)
+        titulo = re.sub(r'(?i)^Press\s+Conference\s*[:\-]\s*', '', titulo)
+        return titulo.strip()
+    
+    def extraer_autor_desde_html(soup_page, titulo_raw, url):
+        """Extrae el autor - Versión estable (con nombres conocidos + fallback)"""
+        
+        page_text = soup_page.get_text()
+        is_webcast = 'multimedia' in url or 'webcast' in titulo_raw.lower()
+        
+        # === 1. CONFERENCIAS DE PRENSA ===
+        if 'press conference' in titulo_raw.lower():
+            if is_webcast:
+                return "Tiff Macklem and Carolyn Rogers"
+            else:
+                return "Tiff Macklem"
+        
+        # === 2. SPEECH SUMMARIES y REMARKS ===
+        # Buscar en media-authors primero (más confiable)
+        author_span = soup_page.find('span', class_='media-authors')
+        if author_span:
+            author_link = author_span.find('a')
+            if author_link:
+                autor = author_link.text.strip()
+                # Limpiar títulos como "Governor" del autor
+                autor = re.sub(r'^Governor\s+', '', autor)
+                autor = re.sub(r'^Deputy\s+Governor\s+', '', autor)
+                autor = re.sub(r'^Senior\s+Deputy\s+Governor\s+', '', autor)
+                return autor
+        
+        # === 3. BUSCAR EN EXCERPT ===
+        excerpt = soup_page.find('span', class_='media-excerpt')
+        if excerpt:
+            excerpt_text = excerpt.get_text()
+            # Buscar "Deputy Governor Sharon Kozicki"
+            match = re.search(r'(?:Deputy Governor|Senior Deputy Governor|Governor)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', excerpt_text)
+            if match:
+                return match.group(1).strip()
+        
+        # === 4. BUSCAR EN TÍTULO DE PÁGINA ===
+        title_tag = soup_page.find('title')
+        if title_tag:
+            title_text = title_tag.text
+            match = re.search(r'by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', title_text)
+            if match:
+                return match.group(1).strip()
+        
+        # === 5. NOMBRES CONOCIDOS (FALLBACK) ===
+        if 'Sharon Kozicki' in page_text:
+            return "Sharon Kozicki"
+        if 'Tiff Macklem' in page_text:
+            return "Tiff Macklem"
+        if 'Carolyn Rogers' in page_text:
+            return "Carolyn Rogers"
+        
+        return None
+    
     while True:
         try:
-            res = requests.get(base_url, headers=headers, params={
-                               'mt_page': page}, timeout=12)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            articles = soup.find_all('div', class_=lambda c: c and (
-                'mtt-result' in c or 'media' in c))
+            if page == 1:
+                url = "https://www.bankofcanada.ca/press/speeches/"
+            else:
+                url = f"https://www.bankofcanada.ca/press/speeches/page/{page}/"
+            
+            print(f"📄 Procesando página {page}: {url}")
+            
+            chrome_options = Options()
+            chrome_options.add_argument('--headless=new')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            
+            driver = webdriver.Chrome(options=chrome_options)
+            driver.get(url)
+            time.sleep(5)
+            
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            driver.quit()
+            
+            articles = soup.find_all('div', class_=lambda c: c and ('mtt-result' in c or 'media' in c or 'entry' in c))
+            
             if not articles:
+                articles = soup.find_all('article')
+            
+            if not articles:
+                print(f"   📭 No hay más artículos en página {page}")
                 break
+            
+            print(f"   📚 Artículos encontrados: {len(articles)}")
             items_found = 0
+            
             for art in articles:
                 h3 = art.find('h3', class_='media-heading')
-                if not h3 or not h3.find('a'):
+                if not h3:
+                    h3 = art.find('h3')
+                if not h3:
                     continue
-                titulo_raw, link = h3.find(
-                    'a').text.strip(), h3.find('a')['href']
-                date_s = art.find('span', class_='media-date')
+                
+                a_tag = h3.find('a')
+                if not a_tag:
+                    continue
+                
+                titulo_raw = a_tag.text.strip()
+                link = a_tag['href']
+                
+                date_elem = art.find('span', class_='media-date')
+                if not date_elem:
+                    date_elem = art.find('time')
+                if not date_elem:
+                    date_elem = art.find(class_=re.compile(r'date', re.I))
+                
+                if not date_elem:
+                    continue
+                
                 try:
-                    parsed_date = parser.parse(date_s.text.strip())
+                    fecha_texto = date_elem.text.strip()
+                    parsed_date = parser.parse(fecha_texto)
                 except:
                     continue
-                if not any(r['Link'] == link for r in rows):
-                    rows.append({"Date": parsed_date, "Title": titulo_raw,
-                                "Link": link, "Organismo": "BoC (Canadá)"})
-                    items_found += 1
-            if items_found == 0 or (rows and rows[-1]['Date'] < start_date):
+                
+                if parsed_date < start_date or parsed_date > end_date:
+                    continue
+                
+                if any(r['Link'] == link for r in rows):
+                    continue
+                
+                print(f"   🔍 Procesando: {parsed_date.strftime('%Y-%m-%d')} - {titulo_raw[:50]}...")
+                
+                autor = None
+                
+                try:
+                    headers = {'User-Agent': 'Mozilla/5.0'}
+                    response = requests.get(link, headers=headers, timeout=10)
+                    if response.status_code == 200:
+                        soup_page = BeautifulSoup(response.text, 'html.parser')
+                        autor = extraer_autor_desde_html(soup_page, titulo_raw, link)
+                        if autor:
+                            print(f"      📝 Autor encontrado: {autor}")
+                except Exception as e:
+                    print(f"      ⚠️ Error obteniendo página: {e}")
+                
+                titulo_limpio = limpiar_titulo(titulo_raw)
+                
+                if autor:
+                    # Limpiar "Governor" del autor si está presente
+                    autor_limpio = re.sub(r'^Governor\s+', '', autor)
+                    titulo_final = f"{autor_limpio}: {titulo_limpio}"
+                else:
+                    titulo_final = titulo_limpio
+                
+                titulo_final = re.sub(r'\s+', ' ', titulo_final).strip()
+                
+                rows.append({
+                    "Date": parsed_date,
+                    "Title": titulo_final,
+                    "Link": link,
+                    "Organismo": "BoC (Canadá)"
+                })
+                items_found += 1
+                print(f"      ✅ Agregado: {titulo_final[:80]}...")
+            
+            if items_found == 0:
                 break
+            
             page += 1
-            time.sleep(0.3)
-        except:
+            time.sleep(1)
+            
+        except Exception as e:
+            print(f"   ⚠️ Error en página {page}: {e}")
             break
+    
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+    
+    print(f"📊 BoC (Canadá) - Total final: {len(df)}")
     return df
 
+## Conversor de Nombre (Nombre, Apellido) para Autores del Banco de Japón  
+def convertir_nombre_japones(nombre):
+    """
+    Convierte nombre japonés (apellido primero) a formato occidental.
+    
+    Ejemplos:
+    - "UEDA Kazuo" -> "Kazuo UEDA"
+    - "UEDA Kazuo San" -> "Kazuo San UEDA"
+    - "KURODA Haruhiko" -> "Haruhiko KURODA"
+    - "AMAMIYA Masayoshi" -> "Masayoshi AMAMIYA"
+    """
+    if not nombre:
+        return nombre
+    
+    partes = nombre.split()
+    if len(partes) < 2:
+        return nombre
+    
+    # La primera palabra es el apellido, el resto es el nombre
+    apellido = partes[0]
+    nombre_pila = " ".join(partes[1:])
+    
+    # Formato occidental: "Nombre Apellido"
+    return f"{nombre_pila} {apellido}"
 
+## Bank of Japan (BOJ - boj) - Discursos
 @st.cache_data(show_spinner=False)
 def load_data_boj(start_date_str, end_date_str):
     base_url = "https://www.boj.or.jp/en/about/press/index.htm"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 BoJ (Japón): {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+        print(f"⚠️ Error en fechas, usando rango por defecto")
+    
     rows = []
     try:
         response = requests.get(base_url, headers=headers, timeout=12)
@@ -3509,30 +4697,69 @@ def load_data_boj(start_date_str, end_date_str):
                 tds = tr.find_all('td')
                 if len(tds) < 3:
                     continue
+                
+                # === 1. EXTRAER FECHA ===
                 try:
-                    parsed_date = parser.parse(
-                        tds[0].get_text(strip=True).replace('\xa0', ' '))
+                    fecha_texto = tds[0].get_text(strip=True).replace('\xa0', ' ')
+                    parsed_date = parser.parse(fecha_texto)
                 except:
                     continue
-                if parsed_date < start_date:
+                
+                # Filtrar por rango de fechas
+                if parsed_date < start_date or parsed_date > end_date:
                     continue
+                
+                # === 2. EXTRAER AUTOR (NUEVO) ===
+                autor_raw = tds[1].get_text(strip=True)
+                autor = None
+                if autor_raw:
+                    # Limpiar el autor: eliminar "Governor", "Deputy Governor", etc.
+                    # Ejemplo: "UEDA Kazuo, Governor" -> "UEDA Kazuo"
+                    autor = re.sub(r',\s*(Governor|Deputy Governor|Member of the Policy Board)$', '', autor_raw)
+                    # Limpiar espacios extra
+                    autor = autor.strip()
+                    # === CONVERTIR NOMBRE JAPONÉS A FORMATO OCCIDENTAL ===
+                    autor = convertir_nombre_japones(autor)
+                
+                # === 3. EXTRAER TÍTULO Y ENLACE ===
                 a_tag = tds[2].find('a', href=True)
                 if not a_tag:
                     continue
+                
                 titulo_raw = a_tag.get_text(strip=True).strip('"')
-                link = "https://www.boj.or.jp" + \
-                    a_tag['href'] if a_tag['href'].startswith(
-                        '/') else a_tag['href']
-                rows.append({"Date": parsed_date, "Title": titulo_raw,
-                            "Link": link, "Organismo": "BoJ (Japón)"})
-    except:
-        pass
+                link = "https://www.boj.or.jp" + a_tag['href'] if a_tag['href'].startswith('/') else a_tag['href']
+                
+                # === 4. CONSTRUIR TÍTULO FINAL CON AUTOR ===
+                if autor:
+                    # Limpiar título: eliminar el nombre del autor si está repetido
+                    titulo_limpio = titulo_raw
+                    # Si el título comienza con el nombre del autor, lo removemos
+                    if titulo_limpio.startswith(autor.split(',')[0]):
+                        titulo_limpio = re.sub(r'^[^:：]+[:：]\s*', '', titulo_limpio)
+                    
+                    titulo_final = f"{autor}: {titulo_limpio}"
+                else:
+                    titulo_final = titulo_raw
+                
+                rows.append({
+                    "Date": parsed_date, 
+                    "Title": titulo_final, 
+                    "Link": link, 
+                    "Organismo": "BoJ (Japón)"
+                })
+                print(f"   ✅ {parsed_date.strftime('%Y-%m-%d')}: {titulo_final[:60]}...")
+    except Exception as e:
+        print(f"⚠️ Error en load_data_boj: {e}")
+    
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=['Link'])
+    print(f"📊 BoJ (Japón) - Total final: {len(df)}")
     return df
 
+## --------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
 def load_data_cef(start_date_str, end_date_str):
@@ -3579,11 +4806,15 @@ def load_data_cef(start_date_str, end_date_str):
         df = df.sort_values("Date", ascending=False)
     return df
 
+## - Discursos - Banco de España - 
 @st.cache_data(show_spinner=False)
 def load_data_bde(start_date_str, end_date_str):
-    """Extractor Banco de España - Versión Selenium (Sincronizada con Sandbox)"""
+    """Extractor Banco de España - Versión con extracción de nombres reales desde PDF"""
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
+    from PyPDF2 import PdfReader
+    import io
+    import requests
     import datetime
     import time
     import re
@@ -3591,6 +4822,7 @@ def load_data_bde(start_date_str, end_date_str):
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
         end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 BdE (España): {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2025, 1, 1)
         end_date = datetime.datetime.now()
@@ -3603,12 +4835,88 @@ def load_data_bde(start_date_str, end_date_str):
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
     
+    def extraer_autor_y_cargo_desde_pdf(pdf_url):
+        """Extrae el nombre y cargo del autor desde el PDF"""
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(pdf_url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                return None, None
+            
+            pdf_file = io.BytesIO(response.content)
+            reader = PdfReader(pdf_file)
+            
+            text = ""
+            for i in range(min(3, len(reader.pages))):
+                page_text = reader.pages[i].extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            
+            if not text:
+                return None, None
+            
+            lineas = text.split('\n')
+            nombre = None
+            cargo = None
+            
+            for i, linea in enumerate(lineas):
+                linea_limpia = linea.strip()
+                
+                if re.search(r'Governor|Gobernador', linea_limpia, re.IGNORECASE):
+                    cargo = "Governor"
+                    if i > 0 and lineas[i-1].strip() and len(lineas[i-1].strip().split()) >= 2:
+                        nombre = lineas[i-1].strip()
+                    elif i + 1 < len(lineas) and lineas[i+1].strip() and len(lineas[i+1].strip().split()) >= 2:
+                        nombre = lineas[i+1].strip()
+                    break
+                elif re.search(r'Deputy Governor|Subgobernador', linea_limpia, re.IGNORECASE):
+                    cargo = "Deputy Governor"
+                    if i > 0 and lineas[i-1].strip() and len(lineas[i-1].strip().split()) >= 2:
+                        nombre = lineas[i-1].strip()
+                    elif i + 1 < len(lineas) and lineas[i+1].strip() and len(lineas[i+1].strip().split()) >= 2:
+                        nombre = lineas[i+1].strip()
+                    break
+                elif re.search(r'Subgobernadora', linea_limpia, re.IGNORECASE):
+                    cargo = "Subgobernadora"
+                    if i > 0 and lineas[i-1].strip() and len(lineas[i-1].strip().split()) >= 2:
+                        nombre = lineas[i-1].strip()
+                    elif i + 1 < len(lineas) and lineas[i+1].strip() and len(lineas[i+1].strip().split()) >= 2:
+                        nombre = lineas[i+1].strip()
+                    break
+                elif re.search(r'D\.G\.|Director General', linea_limpia, re.IGNORECASE):
+                    cargo = "Director General"
+                    if i > 0 and lineas[i-1].strip() and len(lineas[i-1].strip().split()) >= 2:
+                        nombre = lineas[i-1].strip()
+                    elif i + 1 < len(lineas) and lineas[i+1].strip() and len(lineas[i+1].strip().split()) >= 2:
+                        nombre = lineas[i+1].strip()
+                    break
+            
+            if not nombre:
+                for linea in lineas[:15]:
+                    linea_limpia = linea.strip()
+                    if re.match(r'^[A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){1,3}$', linea_limpia):
+                        if not any(palabra in linea_limpia for palabra in ['DIRECTOR', 'GENERAL', 'DEPARTAMENTO', 'SECRETARÍA', 'MINISTERIO', 'GOBIERNO', 'BANCO', 'ESPAÑA', 'MADRID']):
+                            nombre = linea_limpia
+                            break
+            
+            if nombre:
+                nombre = ' '.join(nombre.split())
+                nombre = nombre.title()
+                nombre = re.sub(r'\bDe\b', 'de', nombre)
+                nombre = re.sub(r'\bY\b', 'y', nombre)
+                return nombre, cargo
+            
+            return None, None
+            
+        except Exception as e:
+            print(f"      ⚠️ Error extrayendo del PDF: {e}")
+            return None, None
+
     try:
         driver = webdriver.Chrome(options=chrome_options)
         driver.get(url)
-        time.sleep(8) 
+        time.sleep(8)
 
         js_script = """
         let data = [];
@@ -3617,23 +4925,28 @@ def load_data_bde(start_date_str, end_date_str):
             let titleEl = el.querySelector('.block-search-result__title, a');
             let dateEl = el.querySelector('.block-search-result__date');
             let linkEl = el.querySelector('a');
-            data.push({
-                title: titleEl ? titleEl.innerText : '',
-                dateText: dateEl ? dateEl.innerText : '',
-                link: linkEl ? linkEl.href : ''
-            });
+            if (titleEl && dateEl && linkEl) {
+                data.push({
+                    title: titleEl.innerText,
+                    dateText: dateEl.innerText,
+                    link: linkEl.href
+                });
+            }
         });
         return data;
         """
         extracted = driver.execute_script(js_script)
         driver.quit()
 
-        for item in extracted:
+        print(f"   📚 Discursos encontrados: {len(extracted)}")
+
+        for idx, item in enumerate(extracted):
             raw_title = item['title'].strip()
             raw_date_str = item['dateText'].strip()
-            link = item['link']
+            page_link = item['link']
             
-            if not raw_title or not raw_date_str: continue
+            if not raw_title or not raw_date_str:
+                continue
 
             parsed_date = None
             try:
@@ -3644,21 +4957,345 @@ def load_data_bde(start_date_str, end_date_str):
                     parsed_date = datetime.datetime.strptime(match.group(1), '%d/%m/%Y')
 
             if parsed_date and start_date <= parsed_date <= end_date:
-                if not any(r['Link'] == link for r in rows):
+                print(f"   🔍 Procesando ({idx+1}/{len(extracted)}): {parsed_date.strftime('%Y-%m-%d')}")
+                
+                try:
+                    page_response = requests.get(page_link, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+                    if page_response.status_code == 200:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(page_response.text, 'html.parser')
+                        pdf_link = None
+                        for a in soup.find_all('a', href=True):
+                            if a['href'].endswith('.pdf'):
+                                pdf_link = a['href']
+                                if pdf_link.startswith('/'):
+                                    pdf_link = "https://www.bde.es" + pdf_link
+                                break
+                        
+                        if pdf_link:
+                            print(f"      📄 PDF encontrado, extrayendo autor...")
+                            autor, cargo = extraer_autor_y_cargo_desde_pdf(pdf_link)
+                            # Dentro de load_data_bde(), después de encontrar el autor
+                            if autor:
+                                titulo_limpio = raw_title
+                                
+                                # ========== NUEVA LIMPIEZA MEJORADA ==========
+                                # Eliminar patrones comunes de cargo (en español e inglés)
+                                patrones_cargo = [
+                                    r'D\.G\.\s*Econom[íi]a\.\s*',      # D.G. Economía. o D.G. Economics.
+                                    r'D\.G\.\s*Economics\.\s*',         # D.G. Economics.
+                                    r'Deputy\s*Governor\.\s*',          # Deputy Governor.
+                                    r'Governor\.\s*',                   # Governor.
+                                    r'Subgobernador[a]?\.\s*',          # Subgobernadora. o Subgobernador.
+                                    r'Director\s*General\.\s*',         # Director General.
+                                    r'Head\s*of\s*\w+\.\s*',            # Head of Department.
+                                    r'Director\.\s*',                   # Director.
+                                    r'Chief\s*Economist\.\s*',          # Chief Economist.
+                                    r'Gerente\s*General\.\s*',          # Gerente General.
+                                    r'Vicepresident[ae]\.\s*',          # Vicepresidenta. o Vicepresidente.
+                                    r'President[ae]\.\s*',              # Presidenta. o Presidente.
+                                ]
+                                
+                                for patron in patrones_cargo:
+                                    titulo_limpio = re.sub(patron, '', titulo_limpio, flags=re.IGNORECASE)
+                                
+                                # También eliminar cualquier texto entre paréntesis que parezca un cargo
+                                titulo_limpio = re.sub(r'\s*\([^)]*(?:D\.G\.|Governor|Director|Econom[íi]a)[^)]*\)\s*', ' ', titulo_limpio, flags=re.IGNORECASE)
+                                
+                                # Limpiar espacios múltiples y puntos al inicio
+                                titulo_limpio = re.sub(r'\s+', ' ', titulo_limpio).strip()
+                                titulo_limpio = re.sub(r'^\.\s*', '', titulo_limpio)
+                                
+                                # Construir título final
+                                titulo_final = f"{autor}: {titulo_limpio}"
+                                
+                                # Limpieza adicional: eliminar " : " si el título está vacío
+                                titulo_final = re.sub(r':\s*$', '', titulo_final)
+                                
+                                print(f"      📝 Título limpio: {titulo_final[:80]}...")
+                            
+                            else:
+                                print(f"      ⚠️ No se pudo extraer autor, usando formato estándar")
+                                titulo_final = re.sub(r'\.\s+', ': ', raw_title, count=1)
+                                titulo_final = re.sub(r'\s+', ' ', titulo_final).strip()
+                    else:
+                        titulo_final = re.sub(r'\.\s+', ': ', raw_title, count=1)
+                        
+                except Exception as e:
+                    print(f"      ⚠️ Error accediendo a la página: {e}")
+                    titulo_final = re.sub(r'\.\s+', ': ', raw_title, count=1)
+                
+                if not any(r['Link'] == page_link for r in rows):
                     rows.append({
                         "Date": parsed_date,
-                        "Title": raw_title,
-                        "Link": link,
+                        "Title": titulo_final,
+                        "Link": page_link,
                         "Organismo": "BdE (España)"
                     })
+                    print(f"      ✅ Agregado: {titulo_final[:80]}...")
+
     except Exception as e:
-        print(f"Error BDE: {e}")
+        print(f"❌ Error BDE: {e}")
 
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
+    
+    print(f"📊 BdE (España) - Total final: {len(df)}")
     return df
+
+# ==========================================
+# NUEVAS FUNCIONES PARA BID (bypass Cloudflare)
+# ==========================================
+
+@st.cache_data(show_spinner=False)
+def load_investigacion_bid_cloudscraper(start_date_str, end_date_str):
+    """
+    Extrae Working Papers usando cloudscraper (bypass Cloudflare)
+    """
+    try:
+        import cloudscraper
+    except ImportError:
+        print("❌ cloudscraper no instalado. Ejecuta: pip install cloudscraper")
+        return pd.DataFrame()
+    
+    from bs4 import BeautifulSoup
+    import datetime
+    import re
+    
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 BID Cloudscraper: {start_date.date()} a {end_date.date()}")
+    except:
+        start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+    
+    rows = []
+    
+    # Crear scraper con configuraciones específicas
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'mobile': False
+        },
+        delay=5
+    )
+    
+    # URLs a probar
+    urls_to_try = [
+        "https://publications.iadb.org/en?f%5B0%5D=type%3AWorking%20Papers",
+        "https://publications.iadb.org/es?f%5B0%5D=type%3A4633&f%5B1%5D=type%3ADocumentos%20de%20Trabajo"
+    ]
+    
+    for url in urls_to_try:
+        lang = "en" if "en?" in url else "es"
+        try:
+            print(f"📡 Accediendo a {url[:60]}...")
+            response = scraper.get(url, timeout=30)
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Extraer artículos
+                articles = soup.find_all('div', class_='views-row')
+                print(f"   📚 Artículos encontrados: {len(articles)}")
+                
+                for article in articles:
+                    # Extraer título y link
+                    title_elem = article.find('div', class_='views-field-field-title')
+                    if not title_elem:
+                        continue
+                    
+                    a_tag = title_elem.find('a')
+                    if not a_tag:
+                        continue
+                    
+                    titulo = a_tag.get_text(strip=True)
+                    link = a_tag.get('href')
+                    if link and not link.startswith('http'):
+                        link = "https://publications.iadb.org" + link
+                    
+                    # Extraer fecha
+                    date_elem = article.find('div', class_='views-field-field-date-issued-text')
+                    if date_elem:
+                        date_text = date_elem.get_text(strip=True)
+                        # Parsear fecha "Mar 2026"
+                        match = re.search(r'([A-Za-z]{3})\s+(\d{4})', date_text)
+                        if match:
+                            mes_str, año = match.groups()
+                            meses = {'Jan':1, 'Feb':2, 'Mar':3, 'Apr':4, 'May':5, 'Jun':6,
+                                   'Jul':7, 'Aug':8, 'Sep':9, 'Oct':10, 'Nov':11, 'Dec':12}
+                            mes = meses.get(mes_str, 1)
+                            parsed_date = datetime.datetime(int(año), mes, 1)
+                            
+                            if start_date <= parsed_date <= end_date:
+                                rows.append({
+                                    "Date": parsed_date,
+                                    "Title": titulo,
+                                    "Link": link,
+                                    "Organismo": f"BID ({'Inglés' if lang == 'en' else 'Español'})"
+                                })
+                                print(f"      ✅ {parsed_date.strftime('%Y-%m')}: {titulo[:50]}...")
+            
+        except Exception as e:
+            print(f"⚠️ Error en {lang}: {e}")
+    
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.drop_duplicates(subset=['Link'])
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date", ascending=False)
+    
+    print(f"📊 BID Cloudscraper - Total: {len(df)} documentos")
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_investigacion_bid_selenium_fallback(start_date_str, end_date_str):
+    """
+    Fallback: Extrae Working Papers con Selenium + delay largo
+    """
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from bs4 import BeautifulSoup
+    import datetime
+    import time
+    import re
+    
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
+        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
+        print(f"📅 BID Selenium Fallback: {start_date.date()} a {end_date.date()}")
+    except:
+        start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
+    
+    rows = []
+    
+    chrome_options = Options()
+    chrome_options.add_argument('--headless=new')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_argument('--window-size=1920,1080')
+    
+    urls = [
+        ("https://publications.iadb.org/en?f%5B0%5D=type%3AWorking%20Papers", "en"),
+        ("https://publications.iadb.org/es?f%5B0%5D=type%3A4633&f%5B1%5D=type%3ADocumentos%20de%20Trabajo", "es")
+    ]
+    
+    for url, lang in urls:
+        driver = None
+        try:
+            print(f"📡 Accediendo con Selenium a {url[:60]}...")
+            driver = webdriver.Chrome(options=chrome_options)
+            driver.get(url)
+            
+            # ⚠️ CLAVE: Esperar a que Cloudflare resuelva
+            print("   ⏳ Esperando 20 segundos para Cloudflare...")
+            time.sleep(20)
+            
+            # Scroll para cargar contenido
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(3)
+            
+            # Extraer usando BeautifulSoup
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            articles = soup.find_all('div', class_='views-row')
+            print(f"   📚 Artículos encontrados: {len(articles)}")
+            
+            for article in articles:
+                title_elem = article.find('div', class_='views-field-field-title')
+                if not title_elem:
+                    continue
+                
+                a_tag = title_elem.find('a')
+                if not a_tag:
+                    continue
+                
+                titulo = a_tag.get_text(strip=True)
+                link = a_tag.get('href')
+                if link and not link.startswith('http'):
+                    link = "https://publications.iadb.org" + link
+                
+                date_elem = article.find('div', class_='views-field-field-date-issued-text')
+                if date_elem:
+                    date_text = date_elem.get_text(strip=True)
+                    match = re.search(r'([A-Za-z]{3})\s+(\d{4})', date_text)
+                    if match:
+                        mes_str, año = match.groups()
+                        meses = {'Jan':1, 'Feb':2, 'Mar':3, 'Apr':4, 'May':5, 'Jun':6,
+                               'Jul':7, 'Aug':8, 'Sep':9, 'Oct':10, 'Nov':11, 'Dec':12,
+                               'ene':1, 'feb':2, 'mar':3, 'abr':4, 'may':5, 'jun':6,
+                               'jul':7, 'ago':8, 'sep':9, 'oct':10, 'nov':11, 'dic':12}
+                        mes = meses.get(mes_str, 1)
+                        parsed_date = datetime.datetime(int(año), mes, 1)
+                        
+                        if start_date <= parsed_date <= end_date:
+                            rows.append({
+                                "Date": parsed_date,
+                                "Title": titulo,
+                                "Link": link,
+                                "Organismo": f"BID ({'Inglés' if lang == 'en' else 'Español'})"
+                            })
+            
+        except Exception as e:
+            print(f"⚠️ Error Selenium en {lang}: {e}")
+        finally:
+            if driver:
+                driver.quit()
+    
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.drop_duplicates(subset=['Link'])
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date", ascending=False)
+    
+    print(f"📊 BID Selenium - Total: {len(df)} documentos")
+    return df
+
+
+def load_investigacion_bid_unified(start_date_str, end_date_str):
+    """
+    UNIFICADOR: Prueba cloudscraper primero, si falla usa Selenium
+    """
+    print("="*50)
+    print("🔍 Iniciando extracción BID con estrategia unificada")
+    print("="*50)
+    
+    # Intentar primero con cloudscraper
+    try:
+        print("\n🚀 Estrategia 1: Cloudscraper")
+        df = load_investigacion_bid_cloudscraper(start_date_str, end_date_str)
+        if not df.empty:
+            print(f"✅ Cloudscraper exitoso: {len(df)} documentos")
+            return df
+        else:
+            print("⚠️ Cloudscraper no obtuvo resultados")
+    except Exception as e:
+        print(f"⚠️ Cloudscraper falló: {e}")
+    
+    # Fallback a Selenium
+    print("\n🚀 Estrategia 2: Selenium con delay largo")
+    try:
+        df = load_investigacion_bid_selenium_fallback(start_date_str, end_date_str)
+        if not df.empty:
+            print(f"✅ Selenium exitoso: {len(df)} documentos")
+            return df
+        else:
+            print("⚠️ Selenium no obtuvo resultados")
+    except Exception as e:
+        print(f"⚠️ Selenium falló: {e}")
+    
+    print("\n❌ Ambas estrategias fallaron para BID")
+    return pd.DataFrame()
+
 # ==========================================
 # EXPORTACIÓN A WORD
 # ==========================================
@@ -3813,7 +5450,7 @@ meses_dict = {
 # --- LISTAS DINÁMICAS DE ORGANISMOS ---
 orgs_discursos = ["BBk (Alemania)", "BdE (España)", "BdF (Francia)", "BM", "BoC (Canadá)", "BoE (Inglaterra)", "BoJ (Japón)", "BPI", "CEF", "ECB (Europa)", "Fed (Estados Unidos)", "FMI", "PBoC (China)"]
 orgs_reportes = ["BID", "BM", "BPI", "CEF", "FEM", "OCDE"]
-orgs_pub_inst = ["BM", "BPI", "CEF", "CEMLA", "FMI", "F&D", "G20", "OCDE", "OEI"]
+orgs_pub_inst = ["BM", "BPI", "CEF", "CEMLA", "FMI", "FMI (Mission Concluding)", "F&D", "G20", "OCDE", "OEI"]
 orgs_investigacion = ["BID", "BM", "BPI", "CEMLA", "FMI", "OCDE"]
 
 if modo_app == "Boletín":
@@ -3942,27 +5579,37 @@ if modo_app == "Boletín":
                         df = load_pub_inst_bm(sd, ed)
                     elif org == "OEI": 
                         df = load_pub_inst_oei(sd, ed)
+                    elif org == "OCDE":
+                        df = load_pub_inst_ocde(sd, ed)
                     elif org == "F&D":  
                         df = load_pub_inst_fandd(sd, ed)
                     elif org == "FMI":
                         # 1. SSG - JSON Estático (WEO, Fiscal Monitor)
                         df_flagships = load_pub_inst_fmi(sd, ed)
+                        print(f"📊 FMI - Flagships: {len(df_flagships)} documentos")
 
                         # 2. SSG - JSON Estático (Comunicados)
                         df_prs = load_press_releases_fmi(sd, ed)
+                        print(f"📊 FMI - Press Releases: {len(df_prs)} documentos")
 
                         # 3. CSR API - Coveo (Country Reports)
-                        df_crs = load_country_reports_fmi(
-                            sd, ed)  # <-- LA NUEVA API
+                        df_crs = load_country_reports_fmi(sd, ed)  # <-- LA NUEVA API
+                        print(f"📊 FMI - Country Reports: {len(df_crs)} documentos")
 
                         # Unión
                         dfs_a_unir = [d for d in [df_flagships, df_prs, df_crs] if not d.empty]
                         if dfs_a_unir:
                             df = pd.concat(dfs_a_unir, ignore_index=True)
                             df = df.sort_values("Date", ascending=False)
-
+                            print(f"📊 FMI - TOTAL combinado: {len(df)} documentos")
+                    elif org == "FMI (Mission Concluding)": 
+                        df = load_fmi_news_all(sd, ed)
+                    elif org == "G20":  
+                        df = load_pub_inst_g20(sd, ed)
+                    elif org == "CEMLA":  
+                        df = load_pub_inst_cemla(sd, ed)
                 except Exception as e:
-                    pass
+                    print(f"Error en {org}: {e}")
 
                 if not df.empty:
                     df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
@@ -3981,15 +5628,11 @@ if modo_app == "Boletín":
                 df = pd.DataFrame()
                 try:
                     if org == "BID": 
-                        dfs_bid = []
-                        try: dfs_bid.append(load_investigacion_bid(sd, ed))
-                        except: pass
-                        try: dfs_bid.append(load_investigacion_bid_en(sd, ed))
-                        except: pass
-                        dfs_bid = [d for d in dfs_bid if not d.empty]
-                        if dfs_bid: df = pd.concat(dfs_bid, ignore_index=True).drop_duplicates(subset=['Link'])
+                        df = load_investigacion_bid_unified(sd, ed)
                     elif org == "BPI": df = load_investigacion_bpi(sd, ed)
                     elif org == "BM": df = load_investigacion_bm(sd, ed)
+                    elif org == "CEMLA":
+                        df = load_investigacion_cemla(sd, ed)
                     elif org == "FMI": 
                         df_blogs = pd.DataFrame()
                         df_wp = pd.DataFrame()
@@ -4008,8 +5651,22 @@ if modo_app == "Boletín":
                             df = pd.concat(dfs_a_unir, ignore_index=True)
                             df = df.drop_duplicates(subset=['Link'])
                             df = df.sort_values("Date", ascending=False)
-                except Exception as e: pass
-
+                    # ========== NUEVO BLOQUE PARA OCDE ==========
+                    elif org == "OCDE":
+                        print(f"🔍 === ENTRANDO A OCDE INVESTIGACIÓN ===")
+                        print(f"   sd: {sd}, ed: {ed}")
+                        try:
+                            df = load_investigacion_ocde(sd, ed)
+                            print(f"📊 OCDE Investigación: {len(df)} documentos encontrados")
+                        except Exception as e:
+                            print(f"⚠️ Error en OCDE Investigación: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    # ==========================================
+                except Exception as e:
+                    print(f"⚠️ Error general en {org}: {e}")
+                    pass
+            
                 if not df.empty:
                     df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
                     df_f = df[(df["Date"].dt.year.isin(a_num)) & (
@@ -4032,6 +5689,68 @@ if modo_app == "Boletín":
             # --- CONSOLIDACIÓN FINAL ---
             if all_dfs:
                 f_df = pd.concat(all_dfs, ignore_index=True)
+
+                            # ========== ELIMINACIÓN MEJORADA DE DUPLICADOS ==========
+                print(f"📊 Total antes de desduplicar: {len(f_df)}")
+                
+                # 1. Eliminar duplicados exactos por Link
+                f_df = f_df.drop_duplicates(subset=['Link'], keep='first')
+                print(f"   Después de eliminar duplicados por Link: {len(f_df)}")
+                
+                # 2. Eliminar duplicados por Título (normalizado)
+                # Normalizar títulos: quitar caracteres especiales, espacios múltiples, pasar a minúsculas
+                f_df['Title_Normalized'] = f_df['Title'].str.lower()
+                f_df['Title_Normalized'] = f_df['Title_Normalized'].str.replace(r'[^\w\s]', '', regex=True)
+                f_df['Title_Normalized'] = f_df['Title_Normalized'].str.replace(r'\s+', ' ', regex=True).str.strip()
+                
+                # Eliminar duplicados por título normalizado, manteniendo el primero (el más reciente por fecha)
+                f_df = f_df.sort_values('Date', ascending=False).drop_duplicates(subset=['Title_Normalized'], keep='first')
+                print(f"   Después de eliminar duplicados por título: {len(f_df)}")
+                
+                # 3. Eliminar duplicados que sean casi idénticos (similitud de título > 90%)
+                # Esto ayuda con títulos como "Preserving stability..." vs "Preserving Stability..."
+                def is_similar(title1, title2, threshold=0.9):
+                    """Compara similitud entre dos títulos usando secuencia de palabras"""
+                    words1 = set(title1.lower().split())
+                    words2 = set(title2.lower().split())
+                    if not words1 or not words2:
+                        return False
+                    intersection = words1.intersection(words2)
+                    union = words1.union(words2)
+                    return len(intersection) / len(union) > threshold
+                
+                # Comparar títulos dentro de cada categoría y organismo
+                indices_a_eliminar = set()
+                for categoria in f_df['Categoría'].unique():
+                    for organismo in f_df['Organismo'].unique():
+                        mask = (f_df['Categoría'] == categoria) & (f_df['Organismo'] == organismo)
+                        df_subset = f_df[mask].copy()
+                        
+                        for i in range(len(df_subset)):
+                            if i in indices_a_eliminar:
+                                continue
+                            title_i = df_subset.iloc[i]['Title_Normalized']
+                            for j in range(i + 1, len(df_subset)):
+                                if j in indices_a_eliminar:
+                                    continue
+                                title_j = df_subset.iloc[j]['Title_Normalized']
+                                if is_similar(title_i, title_j):
+                                    # Mantener el más reciente
+                                    date_i = df_subset.iloc[i]['Date']
+                                    date_j = df_subset.iloc[j]['Date']
+                                    if date_i >= date_j:
+                                        indices_a_eliminar.add(df_subset.index[j])
+                                    else:
+                                        indices_a_eliminar.add(df_subset.index[i])
+                
+                # Eliminar duplicados similares
+                f_df = f_df.drop(index=indices_a_eliminar, errors='ignore')
+                print(f"   Después de eliminar duplicados similares: {len(f_df)}")
+                
+                # Eliminar columna temporal
+                f_df = f_df.drop(columns=['Title_Normalized'], errors='ignore')
+                
+                print(f"📊 Total después de desduplicación: {len(f_df)}")
 
                 # --- PREPARACIÓN PARA EL WORD (Orden Institucional) ---
                 df_rep = f_df[f_df['Categoría'] == "Reportes"].copy()
@@ -4150,6 +5869,8 @@ elif modo_app == "Categorías":
                         elif o == "BoJ (Japón)":
                             df = load_data_boj(sd, ed)
                         elif o == "BoE (Inglaterra)": df = load_discursos_boe(sd, ed)
+                        elif o == "CEMLA": 
+                            df = load_investigacion_cemla(sd, ed)
                         elif o == "CEF":
                             df = load_data_cef(sd, ed)
                         elif o == "FMI":
@@ -4186,20 +5907,7 @@ elif modo_app == "Categorías":
 
                     elif tipo_doc == "Investigación":
                         if o == "BID":
-                            dfs_bid = []
-                            try:
-                                dfs_bid.append(load_investigacion_bid(sd, ed))
-                            except:
-                                pass
-                            try:
-                                dfs_bid.append(
-                                    load_investigacion_bid_en(sd, ed))
-                            except:
-                                pass
-                            dfs_bid = [d for d in dfs_bid if not d.empty]
-                            if dfs_bid:
-                                df = pd.concat(dfs_bid, ignore_index=True).drop_duplicates(
-                                    subset=['Link'])
+                            df = load_investigacion_bid_unified(sd, ed)
                         elif o == "BPI":
                             df = load_investigacion_bpi(sd, ed)
                         elif o == "BM":
@@ -4219,24 +5927,42 @@ elif modo_app == "Categorías":
                             dfs_fmi = [d for d in [df_blogs, df_wp] if not d.empty]
                             if dfs_fmi:
                                 df = pd.concat(dfs_fmi, ignore_index=True).drop_duplicates(subset=['Link']).sort_values("Date", ascending=False)
+                        elif o == "OCDE":
+                            df = load_investigacion_ocde(sd, ed)
                     elif tipo_doc == "Publicaciones Institucionales":
                         if o == "BPI":
                             df = load_pub_inst_bpi(sd, ed)
                         elif o == "CEF":
                             df = load_pub_inst_cef(sd, ed)
-                        elif o == "OEI": df = load_pub_inst_oei(sd, ed)
+                        elif o == "OEI": 
+                            df = load_pub_inst_oei(sd, ed)
+                        elif o == "OCDE":
+                            df = load_pub_inst_ocde(sd, ed)
                         elif o == "BM":
                             df = load_pub_inst_bm(sd, ed)
                         elif o == "FMI":
+                            print(f"\n{'='*50}")
+                            print(f"🔍 CATEGORÍAS - Procesando FMI para {m_sel} {a_sel}")
+                            print(f"   Fechas: {sd} a {ed}")
+                            print(f"{'='*50}")
+                            
                             df_flagships = load_pub_inst_fmi(sd, ed)
+                            print(f"   📊 Flagships: {len(df_flagships)} documentos")
+                            
                             df_prs = load_press_releases_fmi(sd, ed)
+                            print(f"   📊 Press Releases: {len(df_prs)} documentos")
+                            
                             df_crs = load_country_reports_fmi(sd, ed)
-                            dfs_a_unir = [d for d in [
-                                df_flagships, df_prs, df_crs] if not d.empty]
+                            print(f"   📊 Country Reports: {len(df_crs)} documentos")
+                            
+                            print(f"🔍 CATEGORÍAS - Flagships: {len(df_flagships)}, PRs: {len(df_prs)}, CRs: {len(df_crs)}")
+                            dfs_a_unir = [d for d in [df_flagships, df_prs, df_crs] if not d.empty]
                             if dfs_a_unir:
                                 df = pd.concat(dfs_a_unir, ignore_index=True)
                                 df = df.sort_values("Date", ascending=False)
-
+                                print(f"   📊 TOTAL combinado FMI: {len(df)} documentos")
+                            else:
+                                print(f"   ⚠️ Ninguna fuente retornó datos")
                 except Exception as e:
                     pass
 
@@ -4255,6 +5981,25 @@ elif modo_app == "Categorías":
             if dfs_comb:
                 f_df = pd.concat(dfs_comb, ignore_index=True)
                 f_df['Categoría'] = tipo_doc
+
+                # ========== ELIMINACIÓN DE DUPLICADOS ==========
+                print(f"📊 Total antes de desduplicar: {len(f_df)}")
+
+                # 1. Eliminar duplicados exactos por Link
+                f_df = f_df.drop_duplicates(subset=['Link'], keep='first')
+                print(f"   Después de eliminar duplicados por Link: {len(f_df)}")
+
+                # 2. Normalizar títulos para comparación
+                f_df['Title_Norm'] = f_df['Title'].str.lower().str.replace(r'[^\w\s]', '', regex=True).str.replace(r'\s+', ' ', regex=True).str.strip()
+
+                # 3. Eliminar duplicados por título normalizado (mismo título en diferentes categorías)
+                f_df = f_df.sort_values('Date', ascending=False).drop_duplicates(subset=['Title_Norm'], keep='first')
+                print(f"   Después de eliminar duplicados por título: {len(f_df)}")
+
+                # 4. Eliminar columna temporal
+                f_df = f_df.drop(columns=['Title_Norm'])
+
+                print(f"📊 Total después de desduplicación: {len(f_df)}")
 
                 # --- PREPARACIÓN PARA EL WORD (Orden Institucional) ---
                 if tipo_doc == "Discursos":
@@ -4294,7 +6039,12 @@ elif modo_app == "Categorías":
 
                 st.markdown(disp[cols_vis].to_markdown(index=False), unsafe_allow_html=True)
             else:
-                st.warning(
+                # Verificar si CEMLA estaba en la búsqueda y no hay resultados
+                if "CEMLA" in target_orgs and tipo_doc == "Investigación":
+                    st.warning("⚠️ No se encontraron documentos para las fechas seleccionadas.")
+                    st.info("📌 **CEMLA Investigación**: ScienceDirect bloquea el acceso automatizado. No se pueden extraer artículos.\n\n➡️ **Solución**: Utiliza la sección **'Carga Manual'** en el menú principal para agregar estos documentos al boletín mensual.")
+                else:
+                    st.warning(
                     "No se encontraron documentos para las fechas seleccionadas.")
 
 elif modo_app == "Carga Manual":
@@ -4407,3 +6157,99 @@ elif modo_app == "Carga Manual":
                 st.rerun()
     else:
         st.warning("Aún no has agregado ninguna carga a la descarga final. Agrega al menos 1 para habilitar el botón de descarga.")
+
+# ==========================================
+# CÓDIGO DE PRUEBA (agregar al final de app.py)
+# ==========================================
+if __name__ == "__main__":
+    print("\n" + "="*50)
+    print("🧪 EJECUTANDO PRUEBA DE API DEL FMI")
+    print("="*50)
+    
+    import requests
+    import datetime
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    url = "https://imfproduction561s308u.org.coveo.com/rest/search/v2?organizationId=imfproduction561s308u"
+    
+    headers = {
+        "Authorization": "Bearer xx742a6c66-f427-4f5a-ae1e-770dc7264e8a",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Origin": "https://www.imf.org",
+        "Referer": "https://www.imf.org/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
+    payload = {
+        "aq": "@imftype==\"IMF Blog Page\" AND @syslanguage==\"English\"",
+        "numberOfResults": 10,
+        "sortCriteria": "@imfdate descending"
+    }
+    
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+        print(f"Status Code: {res.status_code}")
+        
+        if res.status_code == 200:
+            data = res.json()
+            total = data.get('totalCount', 0)
+            print(f"Total de blogs encontrados: {total}")
+            for item in data.get('results', [])[:5]:
+                print(f"  - {item.get('title', '')[:80]}")
+        else:
+            print(f"Error: {res.status_code}")
+    except Exception as e:
+        print(f"Excepción: {e}")
+
+## --
+import requests
+import datetime
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+print("🔍 Buscando el filtro correcto para Working Papers...")
+print("="*50)
+
+url = "https://imfproduction561s308u.org.coveo.com/rest/search/v2?organizationId=imfproduction561s308u"
+
+headers = {
+    "Authorization": "Bearer xx742a6c66-f427-4f5a-ae1e-770dc7264e8a",
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "Origin": "https://www.imf.org",
+    "Referer": "https://www.imf.org/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
+
+# Definir los filtros a probar
+filtros = [
+    ("@imftype==\"IMF Working Papers\"", "imftype"),
+    ("@imfcontenttype==\"Working Paper\"", "imfcontenttype"),
+    ("@publicationtype==\"Working Paper\"", "publicationtype"),
+    ("@title==\"*Working Paper*\"", "title"),
+    ("@uri==\"*elibrary.imf.org/view/journals/002*\"", "uri"),
+]
+
+for query, nombre in filtros:
+    payload = {
+        "aq": f"{query} AND @syslanguage==\"English\"",
+        "numberOfResults": 5,
+        "sortCriteria": "@imfdate descending"
+    }
+    
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+        if res.status_code == 200:
+            data = res.json()
+            total = data.get('totalCount', 0)
+            print(f"\n📌 Filtro: {nombre}")
+            print(f"   Resultados: {total}")
+            for item in data.get('results', [])[:2]:
+                titulo = item.get('title', '')
+                print(f"   - {titulo[:80]}...")
+        else:
+            print(f"\n📌 Filtro: {nombre} - Error {res.status_code}")
+    except Exception as e:
+        print(f"\n📌 Filtro: {nombre} - Excepción: {e}")
