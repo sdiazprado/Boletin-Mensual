@@ -2695,234 +2695,166 @@ def load_investigacion_bid(start_date_str, end_date_str):
         print(f"\n✅ BID Español: {len(df)} documentos")
     
     return df
-## CEMLA INVESTIGACIÓN - INTENTO 
+## CEMLA INVESTIGACIÓN - 
 @st.cache_data(show_spinner=False)
 def load_investigacion_cemla(start_date_str, end_date_str):
     """
     Extractor CEMLA - Latin American Journal of Central Banking
-    Estrategia unificada: cloudscraper -> Selenium -> Crossref API
+    Extrae fecha COMPLETA (con día) si está disponible en Crossref
     """
     import requests
-    from bs4 import BeautifulSoup
     import datetime
-    import re
     from dateutil import parser
-    import time
-    import pandas as pd
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    print("="*60)
+    print("🔍 CEMLA INVESTIGACIÓN - Buscando fechas completas (con día)")
+    print("="*60)
     
     try:
         start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
         end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
-        print(f"📅 CEMLA Investigación: {start_date.date()} a {end_date.date()}")
+        print(f"📅 Rango: {start_date.date()} a {end_date.date()}")
     except:
         start_date = datetime.datetime(2000, 1, 1)
         end_date = datetime.datetime.now()
 
     rows = []
+    issn = "2666-1438"
+    base_url = "https://api.crossref.org/works"
     
-    # =========================================================
-    # ESTRATEGIA 1: Crossref API (la más confiable)
-    # =========================================================
-    print("\n🚀 Estrategia 1: Crossref API")
-    try:
-        url = "https://api.crossref.org/works"
+    # Buscar mes por mes para tener mejor control
+    current = start_date.replace(day=1)
+    
+    while current <= end_date:
+        year = current.year
+        month = current.month
+        
+        # Último día del mes
+        if month == 12:
+            last_day = 31
+        elif month in [4, 6, 9, 11]:
+            last_day = 30
+        else:
+            last_day = 28 if year % 4 != 0 else 29
+        
+        fecha_inicio = f"{year}-{month:02d}-01"
+        fecha_fin = f"{year}-{month:02d}-{last_day}"
+        
+        print(f"\n📆 Buscando {year}-{month:02d}...")
         
         params = {
-            "query": "Latin American Journal of Central Banking",
-            "filter": f"from-pub-date:{start_date.strftime('%Y-%m-%d')},until-pub-date:{end_date.strftime('%Y-%m-%d')}",
+            "filter": f"from-pub-date:{fecha_inicio},until-pub-date:{fecha_fin},issn:{issn}",
             "rows": 50,
             "sort": "published-online",
             "order": "desc"
         }
         
-        response = requests.get(url, params=params, timeout=30, verify=False)
-        
-        if response.status_code == 200:
-            data = response.json()
-            items = data.get('message', {}).get('items', [])
-            print(f"   📚 Documentos encontrados en Crossref: {len(items)}")
-            
-            for item in items:
-                titulo = item.get('title', [''])[0] if item.get('title') else ''
-                doi = item.get('DOI', '')
-                link = f"https://doi.org/{doi}" if doi else ''
-                
-                # Extraer fecha
-                pub_date = item.get('published-print', {}) or item.get('published-online', {})
-                date_parts = pub_date.get('date-parts', [[]])[0]
-                
-                parsed_date = None
-                if len(date_parts) >= 3:
-                    try:
-                        parsed_date = datetime.datetime(date_parts[0], date_parts[1], date_parts[2])
-                    except:
-                        pass
-                elif len(date_parts) >= 2:
-                    try:
-                        parsed_date = datetime.datetime(date_parts[0], date_parts[1], 1)
-                    except:
-                        pass
-                
-                if titulo and link and parsed_date and start_date <= parsed_date <= end_date:
-                    # Extraer autores del item de Crossref
-                    authors = item.get('author', [])
-                    autores = ", ".join([f"{a.get('given', '')} {a.get('family', '')}".strip() for a in authors[:3]])
-                    
-                    if autores and autores not in titulo:
-                        titulo_final = f"{autores}: {titulo}"
-                    else:
-                        titulo_final = titulo
-                    
-                    rows.append({
-                        "Date": parsed_date,
-                        "Title": titulo_final,
-                        "Link": link,
-                        "Organismo": "CEMLA"
-                    })
-                    print(f"   ✅ {parsed_date.strftime('%Y-%m-%d')}: {titulo_final[:60]}...")
-        else:
-            print(f"   ⚠️ Error en Crossref: {response.status_code}")
-    except Exception as e:
-        print(f"   ⚠️ Error en Crossref: {e}")
-    
-    # =========================================================
-    # ESTRATEGIA 2: cloudscraper (intenta bypass)
-    # =========================================================
-    if len(rows) == 0:
-        print("\n🚀 Estrategia 2: cloudscraper (bypass Cloudflare)")
         try:
-            import cloudscraper
-            
-            scraper = cloudscraper.create_scraper(
-                browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False},
-                delay=5
-            )
-            
-            url = "https://www.sciencedirect.com/journal/latin-american-journal-of-central-banking/articles-in-press"
-            response = scraper.get(url, timeout=45)
+            response = requests.get(base_url, params=params, timeout=30, verify=False)
             
             if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                doi_pattern = re.compile(r'10\.1016/j\.latcb\.\d{4}\.\d+')
+                data = response.json()
+                items = data.get('message', {}).get('items', [])
                 
-                for a in soup.find_all('a', href=True):
-                    doi_match = doi_pattern.search(a.get('href', ''))
-                    if doi_match:
-                        doi = doi_match.group(0)
-                        titulo = a.get_text(strip=True)
-                        link = f"https://doi.org/{doi}"
+                if items:
+                    print(f"   📚 Artículos: {len(items)}")
+                    
+                    for item in items:
+                        titulo = item.get('title', [''])[0] if item.get('title') else ''
+                        doi = item.get('DOI', '')
+                        link = f"https://doi.org/{doi}" if doi else ''
                         
-                        # Buscar fecha
-                        container = a.parent
-                        for _ in range(5):
-                            if container and container.name in ['div', 'article', 'li']:
-                                break
-                            container = container.parent if container else None
+                        if not titulo or not link:
+                            continue
                         
-                        container_text = container.get_text() if container else ""
-                        date_match = re.search(r'Available online (\d{1,2})\s+([A-Za-z]+)\s+(\d{4})', container_text, re.IGNORECASE)
+                        # ========== INTENTAR OBTENER FECHA COMPLETA ==========
+                        fecha_completa = None
                         
-                        parsed_date = None
-                        if date_match:
-                            dia, mes_str, año = date_match.groups()
-                            meses = {'january':1, 'february':2, 'march':3, 'april':4, 'may':5, 'june':6,
-                                    'july':7, 'august':8, 'september':9, 'october':10, 'november':11, 'december':12,
-                                    'jan':1, 'feb':2, 'mar':3, 'apr':4, 'may':5, 'jun':6,
-                                    'jul':7, 'aug':8, 'sep':9, 'oct':10, 'nov':11, 'dec':12}
-                            mes_num = meses.get(mes_str.lower(), 1)
-                            parsed_date = datetime.datetime(int(año), mes_num, int(dia))
+                        # 1. Probar con 'published-online' (puede tener día)
+                        pub_online = item.get('published-online', {})
+                        if pub_online:
+                            date_parts = pub_online.get('date-parts', [[]])[0]
+                            if len(date_parts) >= 3:
+                                try:
+                                    fecha_completa = datetime.datetime(date_parts[0], date_parts[1], date_parts[2])
+                                    print(f"      📅 Online: {fecha_completa.strftime('%Y-%m-%d')}")
+                                except:
+                                    pass
                         
-                        if titulo and parsed_date and start_date <= parsed_date <= end_date:
+                        # 2. Probar con 'issued' (fecha de publicación)
+                        if not fecha_completa:
+                            issued = item.get('issued', {})
+                            if issued:
+                                date_parts = issued.get('date-parts', [[]])[0]
+                                if len(date_parts) >= 3:
+                                    try:
+                                        fecha_completa = datetime.datetime(date_parts[0], date_parts[1], date_parts[2])
+                                        print(f"      📅 Issued: {fecha_completa.strftime('%Y-%m-%d')}")
+                                    except:
+                                        pass
+                        
+                        # 3. Probar con 'posted-online'
+                        if not fecha_completa:
+                            posted = item.get('posted-online', {})
+                            if posted:
+                                date_parts = posted.get('date-parts', [[]])[0]
+                                if len(date_parts) >= 3:
+                                    try:
+                                        fecha_completa = datetime.datetime(date_parts[0], date_parts[1], date_parts[2])
+                                        print(f"      📅 Posted: {fecha_completa.strftime('%Y-%m-%d')}")
+                                    except:
+                                        pass
+                        
+                        # 4. Fallback: usar el primer día del mes (si no hay día)
+                        if not fecha_completa:
+                            fecha_completa = datetime.datetime(year, month, 1)
+                            print(f"      ⚠️ Fallback: {fecha_completa.strftime('%Y-%m-%d')} (sin día específico)")
+                        
+                        # Filtrar por rango
+                        if start_date <= fecha_completa <= end_date:
                             rows.append({
-                                "Date": parsed_date,
+                                "Date": fecha_completa,
                                 "Title": titulo,
                                 "Link": link,
                                 "Organismo": "CEMLA"
                             })
-                            print(f"   ✅ {parsed_date.strftime('%Y-%m-%d')}: {titulo[:60]}...")
+                            print(f"      ✅ AGREGADO: {fecha_completa.strftime('%Y-%m-%d')}")
+                        else:
+                            print(f"      ⏭️ Fuera de rango: {fecha_completa.strftime('%Y-%m-%d')}")
+                            
+                else:
+                    print(f"   📭 Sin artículos")
+                    
+            else:
+                print(f"   ❌ Error: {response.status_code}")
+                
         except Exception as e:
-            print(f"   ⚠️ Error en cloudscraper: {e}")
+            print(f"   ❌ Error: {e}")
+        
+        # Siguiente mes
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+        
+        time.sleep(0.5)
     
-    # =========================================================
-    # ESTRATEGIA 3: Selenium con delay largo
-    # =========================================================
-    if len(rows) == 0:
-        print("\n🚀 Estrategia 3: Selenium (último recurso)")
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support.ui import WebDriverWait
-            
-            chrome_options = Options()
-            chrome_options.add_argument('--headless=new')
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--window-size=1920,1080')
-            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-            
-            url = "https://www.sciencedirect.com/journal/latin-american-journal-of-central-banking/articles-in-press"
-            
-            driver = webdriver.Chrome(options=chrome_options)
-            driver.get(url)
-            
-            # Esperar más tiempo por si hay captcha
-            time.sleep(20)
-            
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            driver.quit()
-            
-            doi_pattern = re.compile(r'10\.1016/j\.latcb\.\d{4}\.\d+')
-            
-            for a in soup.find_all('a', href=True):
-                doi_match = doi_pattern.search(a.get('href', ''))
-                if doi_match:
-                    doi = doi_match.group(0)
-                    titulo = a.get_text(strip=True)
-                    link = f"https://doi.org/{doi}"
-                    
-                    container = a.parent
-                    for _ in range(5):
-                        if container and container.name in ['div', 'article', 'li']:
-                            break
-                        container = container.parent if container else None
-                    
-                    container_text = container.get_text() if container else ""
-                    date_match = re.search(r'Available online (\d{1,2})\s+([A-Za-z]+)\s+(\d{4})', container_text, re.IGNORECASE)
-                    
-                    parsed_date = None
-                    if date_match:
-                        dia, mes_str, año = date_match.groups()
-                        meses = {'january':1, 'february':2, 'march':3, 'april':4, 'may':5, 'june':6,
-                                'july':7, 'august':8, 'september':9, 'october':10, 'november':11, 'december':12,
-                                'jan':1, 'feb':2, 'mar':3, 'apr':4, 'may':5, 'jun':6,
-                                'jul':7, 'aug':8, 'sep':9, 'oct':10, 'nov':11, 'dec':12}
-                        mes_num = meses.get(mes_str.lower(), 1)
-                        parsed_date = datetime.datetime(int(año), mes_num, int(dia))
-                    
-                    if titulo and parsed_date and start_date <= parsed_date <= end_date:
-                        rows.append({
-                            "Date": parsed_date,
-                            "Title": titulo,
-                            "Link": link,
-                            "Organismo": "CEMLA"
-                        })
-                        print(f"   ✅ {parsed_date.strftime('%Y-%m-%d')}: {titulo[:60]}...")
-        except Exception as e:
-            print(f"   ⚠️ Error en Selenium: {e}")
-    
-    # =========================================================
-    # RESULTADO FINAL
-    # =========================================================
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
         df = df.drop_duplicates(subset=['Link'])
     
-    print(f"\n📊 CEMLA Investigación - Total final: {len(df)}")
+    print(f"\n{'='*60}")
+    print(f"📊 CEMLA Investigación - Total: {len(df)} documentos")
+    if not df.empty:
+        print("\n📅 Primeros 5 documentos con sus fechas:")
+        for i, row in df.head(5).iterrows():
+            print(f"   {row['Date'].strftime('%Y-%m-%d')}: {row['Title'][:60]}...")
+    print(f"{'='*60}")
+    
     return df
 
 ##  ---- 
